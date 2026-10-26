@@ -17,6 +17,7 @@ const COLORS = {
     text:       '#e6e6ef',
     textDim:    '#9a9ab0',
     accent:     '#89b4fa',
+    bad:        '#f38ba8',
     track:      '#3b3b52',
 };
 
