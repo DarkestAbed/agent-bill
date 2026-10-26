@@ -12,5 +12,12 @@
 __pycache__/
 *.pyc
 
+# Node (unit tests use only the built-in node:test runner — no deps, but
+# ignore any local install just in case)
+node_modules/
+
 # Local-only desklet install artifacts (should not be committed)
 desklet/*/build/
+
+# Test/verify scratch
+/tmp/agent-bill-tests.log

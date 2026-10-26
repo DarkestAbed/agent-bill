@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# verify.sh — static verification for the agent-bill desklet.
+# verify.sh — verification gate for the agent-bill desklet.
 # Runs in the WSL/dev sandbox where Cinnamon and GJS are NOT available.
 # It checks: JSON validity, JS syntax (node --check), UUID/folder match,
-# required files presence, and that settings-schema callbacks exist in JS.
+# required files presence, settings-schema callbacks exist in JS, AND runs
+# the unit-test suite (node --test tests/) for the pure-logic module
+# (lib/usage.js). For the real integration test on the target, use smoke.sh.
 set -uo pipefail
 
 REPO="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
@@ -71,6 +73,20 @@ if grep -rInE "sk-ant-admin01-[A-Za-z0-9_-]{10,}|sk-[A-Za-z0-9_-]{20,}|Bearer [A
     bad "possible hardcoded API key found in desklet source!"
 else
     ok "no hardcoded API keys in source"
+fi
+
+# 8. Unit tests (node --test) for the pure-logic module lib/usage.js.
+if command -v node >/dev/null 2>&1; then
+    if node --test "$REPO"/tests/*.test.js >/tmp/agent-bill-tests.log 2>&1; then
+        n_tests=$(grep -cE '^✔ ' /tmp/agent-bill-tests.log)
+        n_fail=$(grep -cE '^✖ ' /tmp/agent-bill-tests.log)
+        ok "unit tests (node --test): ${n_tests:-0} passed, ${n_fail:-0} failed"
+    else
+        bad "unit tests FAILED — see /tmp/agent-bill-tests.log"
+        tail -40 /tmp/agent-bill-tests.log || true
+    fi
+else
+    bad "node not found; cannot run unit tests"
 fi
 
 echo "== result: $pass passed, $fail failed =="

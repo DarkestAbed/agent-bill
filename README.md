@@ -96,6 +96,43 @@ To pick up upstream changes later: `git pull`, then `install.sh` + `reload.sh`.
 - Per-provider **enable** toggles (Claude / Codex / Ollama)
 - **Enter / Remove API key** buttons per provider (stored in the keyring)
 
+## Testing
+
+Two layers, because the code needs both a sandbox and a real Cinnamon session:
+
+- **Unit tests** (run anywhere Node is present, including this dev sandbox):
+  ```bash
+  npm test                 # == node --test tests/*.test.js
+  ```
+  Covers the pure-logic module `lib/usage.js` (token summation across nested
+  provider `results[]` buckets, Anthropic/OpenAI/Ollama field mapping, the
+  Ollama `5h`→`24h` clamp, range→`bucket_width`/`range` mappers, and
+  error-isolation so one bad provider payload can't break the others). A tiny
+  GJS shim (`tests/helpers/load-gjs.js`) loads the real module into Node by
+  mirroring GJS function-export semantics and stubbing `imports`/`global`.
+
+- **Verification gate** (static + unit, runs in the sandbox):
+  ```bash
+  ./scripts/verify.sh      # == npm run verify
+  ```
+  Checks JSON validity, `node --check` on every JS file, UUID↔folder match,
+  settings-callback presence, the `main(metadata, deskletId)` entry point, a
+  no-hardcoded-API-key guard, **and** the unit-test suite.
+
+- **Integration smoke test** (run **on the LMDE 7 target** — it needs real GJS
+  + the Secret Service keyring, which the WSL sandbox lacks):
+  ```bash
+  ./scripts/smoke.sh                 # install + files + metadata + keyring + leak checks
+  ./scripts/smoke.sh --reload        # also restart the Cinnamon shell afterwards
+  ```
+  Verifies the installed desklet, then round-trips a throwaway secret through
+  the **real** `lib/keyring.js` under GJS (`scripts/smoke-keyring.js`) and
+  asserts no plaintext key lands on disk.
+
+**Full e2e** (render + live API fetch per provider) is a manual checklist on
+LMDE 7: add the desklet, enter the three API keys in settings, and confirm the
+cards populate. This needs your real keys and a live Cinnamon session.
+
 ## Debugging
 
 - View desklet logs in **Looking Glass**: right-click the panel → **Troubleshoot** → **Looking Glass** (the code uses `global.log` / `global.logError`).
