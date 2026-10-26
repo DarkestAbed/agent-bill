@@ -4,6 +4,7 @@
 
 const Soup = imports.gi.Soup;
 const GLib = imports.gi.GLib;
+const ByteArray = imports.byteArray;
 
 const SOUP_SESSION = new Soup.Session();
 // Keep sessions modest; providers are low-volume.
@@ -47,7 +48,11 @@ function getJson(url, headers) {
                 try {
                     const bytes = SOUP_SESSION.send_and_read_finish(result);
                     const status = message.get_status();
-                    const bodyText = bytes ? new TextDecoder().decode(bytes.get_data()) : '';
+                    // ByteArray.toString is the idiomatic Cinnamon/cjs way to
+                    // decode a GLib.Bytes payload (TextDecoder also works in
+                    // mozjs-128, but ByteArray avoids the Uint8Array.toString
+                    // deprecation warning seen in the logs).
+                    const bodyText = bytes ? ByteArray.toString(bytes.get_data()) : '';
                     if (status < 200 || status >= 300) {
                         const err = new Error(`HTTP ${status} for ${url}`);
                         err.status = status;

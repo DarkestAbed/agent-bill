@@ -3,13 +3,7 @@
 // straight to libsecret; it is never displayed or persisted in plaintext.
 
 const St = imports.gi.St;
-const Clutter = imports.gi.Clutter;
 const ModalDialog = imports.ui.modalDialog;
-
-const Ui = (() => {
-    const Me = imports.misc.extensionUtils.getCurrentExtension();
-    return Me.imports.lib.ui;
-})();
 
 const COLORS = {
     background: '#1e1e2e',
@@ -35,13 +29,13 @@ function showKeyDialog({ title, description, onSubmit }) {
         style: `color: ${COLORS.textDim}; font-size: 12px;`,
     });
 
-    const entry = new St.Entry({
+    // St.PasswordEntry is the Cinnamon-native masked entry (Cinnamon 6.x).
+    // Clutter.UnicodeChar no longer exists in Clutter 0 — don't use it.
+    const entry = new St.PasswordEntry({
         style: `background-color: ${COLORS.surface}; color: ${COLORS.text};` +
                `border: 1px solid ${COLORS.track}; border-radius: 8px; padding: 8px;`,
         can_focus: true,
     });
-    // Mask the key as it is typed.
-    entry.clutter_text.set_password_char(Clutter.UnicodeChar.BULLET);
 
     const errorLabel = new St.Label({
         text: '',
@@ -71,7 +65,9 @@ function showKeyDialog({ title, description, onSubmit }) {
         dialog.close();
     });
     cancelButton.connect('clicked', () => dialog.close());
-    entry.connect('activate', () => saveButton.emit('clicked'));
+    // The 'activate' signal (Enter key) lives on the inner Clutter.Text,
+    // not on St.Entry itself — same as Cinnamon's keyringPrompt.js.
+    entry.clutter_text.connect('activate', () => saveButton.emit('clicked'));
 
     const buttonRow = new St.BoxLayout({ style: 'spacing: 10px;' });
     buttonRow.add_child(cancelButton);
@@ -86,6 +82,12 @@ function showKeyDialog({ title, description, onSubmit }) {
 
     dialog.setButtons([]); // we manage our own buttons
     dialog.contentLayout.add_child(content);
+
+    // When the dialog closes (either button), release our refs so GJS can
+    // GC the actors. The dialog itself is destroyed by ModalDialog.close().
+    dialog.connect('closed', () => {
+        content.destroy();
+    });
 
     dialog.open();
     entry.grab_key_focus();

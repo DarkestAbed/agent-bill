@@ -10,6 +10,14 @@ if ! command -v cinnamon >/dev/null 2>&1; then
 fi
 
 # Replace the running Cinnamon instance in place.
-cinnamon --replace >/dev/null 2>&1 &
+# IMPORTANT: do NOT discard stderr. C-level Clutter assertions ("Bail out!
+# …") and JS errors from the shell go to stderr; if the new shell crashes
+# during startup, this log is the ONLY place the reason survives (the process
+# is fire-and-forget, so its output would otherwise be lost forever).
+LOG="$HOME/.local/share/cinnamon/cinnamon-replace.log"
+mkdir -p "$(dirname "$LOG")"
+echo "=== cinnamon --replace started $(date -Is) ===" >> "$LOG"
+cinnamon --replace >>"$LOG" 2>&1 &
 
 echo "Cinnamon shell reload requested."
+echo "If it crashes, the reason is in: $LOG"

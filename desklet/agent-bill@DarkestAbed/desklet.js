@@ -7,16 +7,19 @@ const Desklet = imports.ui.desklet;
 const St = imports.gi.St;
 const Mainloop = imports.mainloop;
 const Settings = imports.ui.settings;
-const GLib = imports.gi.GLib;
 
-const Me = imports.misc.extensionUtils.getCurrentExtension();
-const Ui = Me.imports.lib.ui;
-const Keyring = Me.imports.lib.keyring;
-const Usage = Me.imports.lib.usage;
-const KeyDialog = Me.imports.lib.keydialog;
-const ClaudeProvider = Me.imports.providers.claude.Provider;
-const CodexProvider = Me.imports.providers.codex.Provider;
-const OllamaProvider = Me.imports.providers.ollama.Provider;
+// Cinnamon injects require() into extension modules. IMPORTANT: paths resolve
+// against the desklet ROOT directory (not the calling file's directory), and
+// '../' is mangled by requireModule — always use './lib/…', './providers/…'
+// from anywhere in the desklet. (imports.misc.extensionUtils does NOT exist
+// in Cinnamon — that's a GNOME Shell-ism.)
+const Ui = require('./lib/ui.js');
+const Keyring = require('./lib/keyring.js');
+const Usage = require('./lib/usage.js');
+const KeyDialog = require('./lib/keydialog.js');
+const ClaudeProvider = require('./providers/claude.js').Provider;
+const CodexProvider = require('./providers/codex.js').Provider;
+const OllamaProvider = require('./providers/ollama.js').Provider;
 
 const UUID = 'agent-bill@DarkestAbed';
 
@@ -41,6 +44,12 @@ class AgentBillDesklet extends Desklet.Desklet {
         this._snapshots = new Map();   // providerId -> last UsageSnapshot
         this._timeoutId = null;
         this._refreshing = false;
+        // Set when the desklet is removed/reloaded. Every async callback
+        // (HTTP promise, keyring promise, timer) MUST check this before
+        // touching any actor — after teardown the actors are gone and
+        // touching them can crash the shell (Clutter asserts on disposed
+        // actors — see cinnamon-6-gotchas.md).
+        this._destroyed = false;
 
         this.settings = new Settings.DeskletSettings(this, UUID, deskletId);
         this.settings.bindProperty(Settings.BindingDirection.IN,
@@ -141,6 +150,7 @@ class AgentBillDesklet extends Desklet.Desklet {
             description: `Paste your ${what}. It is stored encrypted in the GNOME keyring and never written to disk in plaintext.`,
             onSubmit: (key) => {
                 Keyring.storeKey(provider.id, key).then((ok) => {
+                    if (this._destroyed) return; // dialog outlived the desklet
                     this._footerLabel.set_text(ok
                         ? `${provider.label} key saved to keyring.`
                         : `Failed to save ${provider.label} key.`);
@@ -152,6 +162,7 @@ class AgentBillDesklet extends Desklet.Desklet {
 
     _clearKey(provider) {
         Keyring.clearKey(provider.id).then((ok) => {
+            if (this._destroyed) return;
             this._footerLabel.set_text(ok
                 ? `${provider.label} key removed.`
                 : `Failed to remove ${provider.label} key.`);
@@ -168,10 +179,13 @@ class AgentBillDesklet extends Desklet.Desklet {
 
     _reconcileCards() {
         const enabled = new Set(this._enabledProviders().map((p) => p.id));
-        // Remove cards for disabled providers.
+        // Remove cards for disabled providers. card.destroy() removes the
+        // actor from its parent AND destroys it — remove_child() alone would
+        // leave a parentless-but-alive actor that GJS later disposes, and
+        // Clutter 6 aborts if disposal happens while still parented.
         for (const [id, card] of this._cards) {
             if (!enabled.has(id)) {
-                this._cardsBox.remove_child(card.actor);
+                card.destroy();
                 this._cards.delete(id);
             }
         }
@@ -183,9 +197,14 @@ class AgentBillDesklet extends Desklet.Desklet {
     }
 
     _scheduleRefresh(delaySeconds) {
+        if (this._destroyed)
+            return;
         this._stopTimer();
         const delay = Math.max(0, delaySeconds !== undefined ? delaySeconds : this.refreshInterval * 60);
         this._timeoutId = Mainloop.timeout_add_seconds(delay, () => {
+            this._timeoutId = null;
+            if (this._destroyed)
+                return false;
             this._refresh();
             return false; // we reschedule ourselves each tick
         });
@@ -201,8 +220,8 @@ class AgentBillDesklet extends Desklet.Desklet {
     }
 
     _refresh() {
-        if (this._refreshing)
-            return; // don't overlap fetches
+        if (this._destroyed || this._refreshing)
+            return; // don't overlap fetches; bail if desklet is gone
         this._refreshing = true;
         this._liveDot.style = 'background-color: #f9e2af; border-radius: 50%; width: 10px; height: 10px;'; // amber = working
 
@@ -214,6 +233,13 @@ class AgentBillDesklet extends Desklet.Desklet {
         );
 
         Promise.allSettled(tasks).then((results) => {
+            // The desklet may have been removed/reloaded while the HTTP
+            // requests were in flight. Touching actors now would operate on
+            // disposed Clutter actors — guard with _destroyed.
+            if (this._destroyed) {
+                this._refreshing = false;
+                return;
+            }
             for (const result of results) {
                 if (result.status !== 'fulfilled')
                     continue;
@@ -223,15 +249,12 @@ class AgentBillDesklet extends Desklet.Desklet {
                 if (card) {
                     card.render(snapshot, RANGE_LABELS[range] || range);
                     card.renderBar(this._windowPercent(provider.id, snapshot, range));
-                    if (provider.id === 'codex' || provider.id === 'claude')
-                        card.setStatus('ok');
-                    else
-                        card.setStatus('ok');
+                    card.setStatus('ok');
                 }
             }
             this._refreshing = false;
             this._liveDot.style = 'background-color: #a6e3a1; border-radius: 50%; width: 10px; height: 10px;'; // green = done
-            this._footerLabel.set_text(`last refresh ${Ui._formatTime ? '' : ''}${new Date().toLocaleTimeString('en-US')}`);
+            this._footerLabel.set_text(`last refresh ${new Date().toLocaleTimeString('en-US')}`);
             this._scheduleRefresh(); // next tick
         });
     }
@@ -239,8 +262,10 @@ class AgentBillDesklet extends Desklet.Desklet {
     _fetchOne(provider, range) {
         const key = Keyring.lookupKey(provider.id);
         if (!key) {
-            const card = this._cards.get(provider.id);
-            if (card) card.renderError('no API key — open settings to add one');
+            if (!this._destroyed) {
+                const card = this._cards.get(provider.id);
+                if (card) card.renderError('no API key — open settings to add one');
+            }
             return Promise.reject(new Error('no key'));
         }
         return provider.fetchUsage(range, key)
@@ -273,6 +298,9 @@ class AgentBillDesklet extends Desklet.Desklet {
     }
 
     on_desklet_removed() {
+        // Cinnamon is about to fade+destroy our actor tree. From this point
+        // on, NO async callback may touch any actor — set the flag first.
+        this._destroyed = true;
         this._stopTimer();
         if (this.settings) {
             this.settings.finalize();
@@ -282,6 +310,9 @@ class AgentBillDesklet extends Desklet.Desklet {
 
     on_desklet_reloaded() {
         // Desklet is being reloaded; timers/settings are torn down by Cinnamon.
+        // Same guard as removal: in-flight HTTP/keyring callbacks must not
+        // touch the (soon-to-be-destroyed) actors.
+        this._destroyed = true;
         this._stopTimer();
     }
 }

@@ -5,9 +5,10 @@
 // Limits:   10 req/min per user; 429 carries a Retry-After header (surfaced
 //           by lib/http.js as err.retryAfterSeconds).
 
-const Me = imports.misc.extensionUtils.getCurrentExtension();
-const HttpLib = Me.imports.lib.http;
-const Usage = Me.imports.lib.usage;
+// Cinnamon's require() resolves relative to the desklet ROOT (not this file),
+// so paths look like they're from desklet.js even though we're in providers/.
+const HttpLib = require('./lib/http.js');
+const Usage = require('./lib/usage.js');
 
 const API_BASE = 'https://ollama.com';
 

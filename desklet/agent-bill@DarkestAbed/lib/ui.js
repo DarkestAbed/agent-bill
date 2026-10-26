@@ -2,7 +2,6 @@
 // All visual pieces are constructed here so desklet.js stays declarative.
 
 const St = imports.gi.St;
-const Clutter = imports.gi.Clutter;
 const Pango = imports.gi.Pango;
 
 // One dark palette for the whole desklet.
@@ -44,38 +43,50 @@ function makeLabel(text, opts = {}) {
 }
 
 // A horizontal usage bar: a track with a filled portion and a % label.
+// The fill width is driven by a plain style string on `inner`, so setPercent()
+// can update the bar IN PLACE — no actor is ever removed, re-parented or
+// destroyed. (Clutter 6 aborts the whole shell if an actor reaches dispose
+// with a non-NULL parent — see cinnamon-6-gotchas.md.)
 function makeUsageBar(percent) {
     const clamped = Math.max(0, Math.min(100, percent || 0));
-    const barColor = clamped >= 90 ? COLORS.bad : clamped >= 70 ? COLORS.warn : COLORS.good;
 
+    // Track: solid background, expands to fill available width.
     const track = new St.Bin({
         style: `background-color: ${COLORS.track}; border-radius: 6px; height: 10px;`,
         x_expand: true,
     });
-    const fill = new St.Bin({
-        style: `background-color: ${barColor}; border-radius: 6px; height: 10px;`,
-        width: Math.max(2, Math.round(clamped)), // % of track width via layout
-    });
-    // Use a fixed-percentage child inside an expanding track.
-    const trackBox = new St.BoxLayout({ x_expand: true });
-    const fillWrap = new St.Bin({ x_expand: false });
-    fillWrap.set_width(0); // width set by fraction below via allocation
+
+    // Fill: same height, width is a % of the track via CSS on `inner`.
     const fillActor = new St.Bin({
-        style: `background-color: ${barColor}; border-radius: 6px; height: 10px;`,
+        style: `background-color: ${_barColor(clamped)}; border-radius: 6px; height: 10px;`,
         x_expand: true,
     });
     const inner = new St.BoxLayout({ x_expand: true, style: `width: ${clamped}%;` });
     inner.add_child(fillActor);
-    fillWrap.add_child(inner);
-    trackBox.add_child(fillWrap);
+    track.set_child(inner); // St.Bin.set_child — properly unparents the old child
 
     const pctLabel = makeLabel(`${Math.round(clamped)}%`, { size: 12, dim: true });
 
     const row = new St.BoxLayout({ style: 'spacing: 8px;', x_expand: true });
-    row.add_child(trackBox);
+    row.add_child(track);
     row.add_child(pctLabel);
 
-    return { actor: row, setPercent(p) { /* updated by re-render */ } };
+    return {
+        actor: row,
+        _fill: fillActor,
+        _inner: inner,
+        _pctLabel: pctLabel,
+        setPercent(p) {
+            const c = Math.max(0, Math.min(100, p || 0));
+            this._inner.style = `width: ${c}%;`;
+            this._fill.style = `background-color: ${_barColor(c)}; border-radius: 6px; height: 10px;`;
+            this._pctLabel.set_text(`${Math.round(c)}%`);
+        },
+    };
+}
+
+function _barColor(clamped) {
+    return clamped >= 90 ? COLORS.bad : clamped >= 70 ? COLORS.warn : COLORS.good;
 }
 
 // A single line of "name: value" stats.
@@ -176,14 +187,11 @@ function makeProviderCard(providerId, providerLabel) {
         },
 
         renderBar(percent) {
-            // Rebuild the bar fill at a new percentage by re-rendering the card
-            // bar in place is complex; simplest correct approach: replace child.
-            const newBar = makeUsageBar(percent);
-            const parent = this._bar.actor.get_parent();
-            const idx = parent.get_children().indexOf(this._bar.actor);
-            parent.remove_child(this._bar.actor);
-            parent.insert_child_at_index(newBar.actor, idx);
-            this._bar = newBar;
+            // Update the existing bar in place. NEVER remove/re-insert/destroy
+            // the bar actor here — Clutter 6 aborts the whole shell with
+            // "clutter_actor_dispose: assertion failed: (priv->parent == NULL)"
+            // if an actor reaches dispose while still parented.
+            this._bar.setPercent(percent);
         },
 
         renderError(message) {
@@ -194,6 +202,18 @@ function makeProviderCard(providerId, providerLabel) {
             this._statCost.valueLabel.set_text('—');
             this._weekly.valueLabel.set_text('—');
             this._footer.set_text(`⚠ ${message}`);
+        },
+
+        // Tear down the card. remove_child() detaches only — the actor must
+        // then be destroy()ed so GJS drops its ref and Clutter can dispose it
+        // with parent == NULL. Never destroy() an actor that still has a
+        // parent: Clutter 6 aborts the whole shell on that (SIGABRT in
+        // clutter_actor_dispose — see cinnamon-6-gotchas.md).
+        destroy() {
+            const parent = this.actor.get_parent();
+            if (parent)
+                parent.remove_child(this.actor);
+            this.actor.destroy();
         },
     };
 }

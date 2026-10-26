@@ -4,9 +4,10 @@
 // Buckets:  bucket_width=1h for 5h/24h, 1d for 7d. group_by=model so Codex
 //           models are distinguishable (usage is aggregated across the org).
 
-const Me = imports.misc.extensionUtils.getCurrentExtension();
-const HttpLib = Me.imports.lib.http;
-const Usage = Me.imports.lib.usage;
+// Cinnamon's require() resolves relative to the desklet ROOT (not this file),
+// so paths look like they're from desklet.js even though we're in providers/.
+const HttpLib = require('./lib/http.js');
+const Usage = require('./lib/usage.js');
 
 const API_BASE = 'https://api.openai.com';
 

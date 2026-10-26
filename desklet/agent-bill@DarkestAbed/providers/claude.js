@@ -3,12 +3,10 @@
 // Auth:     x-api-key: <organization admin key>  +  anthropic-version: 2023-06-01
 // Buckets:  bucket_width=1h (max 168h, covers our 5h/24h/7d ranges).
 
-const Http = imports.ui.extensionSystem.extensions['agent-bill@DarkestAbed']
-    ? null : null; // resolved at load time below
-
-const Me = imports.misc.extensionUtils.getCurrentExtension();
-const HttpLib = Me.imports.lib.http;
-const Usage = Me.imports.lib.usage;
+// Cinnamon's require() resolves relative to the desklet ROOT (not this file),
+// so paths look like they're from desklet.js even though we're in providers/.
+const HttpLib = require('./lib/http.js');
+const Usage = require('./lib/usage.js');
 
 const API_BASE = 'https://api.anthropic.com';
 const ANTHROPIC_VERSION = '2023-06-01';

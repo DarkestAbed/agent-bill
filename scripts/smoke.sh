@@ -30,8 +30,15 @@ done
 
 echo "== agent-bill smoke (target) =="
 
-# 0. environment
-command -v gjs >/dev/null 2>&1 && ok "gjs present" || bad "gjs missing (install: sudo apt install gjs)"
+# 0. environment — LMDE 7 ships `cjs` (Cinnamon's GJS fork), NOT `gjs`
+if command -v cjs >/dev/null 2>&1; then
+    ok "cjs present (LMDE 7 / Cinnamon GJS fork)"
+elif command -v gjs >/dev/null 2>&1; then
+    ok "gjs present (stand-in for cjs)"
+else
+    bad "no GJS runtime found (install: sudo apt install cjs)"
+fi
+GJS_BIN="$(command -v cjs || command -v gjs)"
 command -v jq  >/dev/null 2>&1 && ok "jq present"  || note "jq missing (JSON checks will be skipped)"
 
 # 1. install (idempotent)
@@ -66,20 +73,20 @@ else
     note "node not present; skipping JS syntax check (the Cinnamon render is the real load test)"
 fi
 
-# 5. libsecret available + keyring round-trip via the REAL lib/keyring.js under gjs
-if command -v gjs >/dev/null 2>&1; then
-    if gjs -c "imports.gi.Secret;" 2>/dev/null; then
-        ok "libsecret (Secret) loadable in GJS"
+# 5. libsecret available + keyring round-trip via the REAL lib/keyring.js under cjs/gjs
+if [[ -n "$GJS_BIN" ]]; then
+    if "$GJS_BIN" -c "imports.gi.Secret;" 2>/dev/null; then
+        ok "libsecret (Secret) loadable in $GJS_BIN"
     else
         bad "libsecret not available (install: sudo apt install gir1.2-secret-1)"
     fi
-    if AGENT_BILL_DESKLET_DIR="$INSTALLED" gjs "$REPO/scripts/smoke-keyring.js"; then
+    if AGENT_BILL_DESKLET_DIR="$INSTALLED" "$GJS_BIN" "$REPO/scripts/smoke-keyring.js"; then
         ok "keyring round-trip via lib/keyring.js"
     else
         bad "keyring round-trip failed (see scripts/smoke-keyring.js output)"
     fi
 else
-    bad "gjs missing; cannot run keyring integration test"
+    bad "no GJS runtime; cannot run keyring integration test"
 fi
 
 # 6. no plaintext secrets in the installed files
@@ -92,6 +99,29 @@ if grep -rInE "sk-ant-admin01-[A-Za-z0-9_-]{10,}|sk-[A-Za-z0-9_-]{20,}" "$INSTAL
     bad "hardcoded API key pattern found in installed files!"
 else
     ok "no hardcoded API key pattern in installed files"
+fi
+
+# 6b. no GNOME Shell-isms in installed files (would crash at load time on Cinnamon 6.x)
+if grep -rInE 'imports\.misc\.extensionUtils|Me\.imports\.' "$INSTALLED" 2>/dev/null | grep -vE ':\s*//' | grep -qE 'imports\.misc\.extensionUtils|Me\.imports\.'; then
+    bad "GNOME Shell import pattern in installed files (extensionUtils / Me.imports)!"
+else
+    ok "no GNOME Shell import patterns in installed files"
+fi
+if grep -rIn 'Clutter\.UnicodeChar' "$INSTALLED" 2>/dev/null | grep -vE ':\s*//' | grep -q 'Clutter\.UnicodeChar'; then
+    bad "Clutter.UnicodeChar in installed files (removed in Cinnamon 6.x)!"
+else
+    ok "no Clutter.UnicodeChar in installed files"
+fi
+
+# 6c. no bare remove_child() in installed files (crash-#2 shell-abort guard)
+# The one allowed call site is card.destroy() in lib/ui.js (paired with .destroy()).
+if grep -rInE '\.remove_child\(' "$INSTALLED" 2>/dev/null \
+   | grep -vE ':\s*//' \
+   | grep -vE 'lib/ui\.js:[0-9]+:\s*parent\.remove_child\(this\.actor\);' \
+   | grep -qE '\.remove_child\('; then
+    bad "bare remove_child() in installed files (must be followed by .destroy() or use in-place update — crashes Cinnamon 6 shell)!"
+else
+    ok "no bare remove_child() in installed files"
 fi
 
 # 7. optional Cinnamon reload
