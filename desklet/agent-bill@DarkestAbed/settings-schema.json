@@ -1,0 +1,93 @@
+{
+  "head-general": {
+    "type": "header",
+    "description": "General"
+  },
+  "refresh-interval": {
+    "type": "spinbutton",
+    "default": 5,
+    "min": 1,
+    "max": 60,
+    "step": 1,
+    "units": "minutes",
+    "description": "Refresh interval",
+    "tooltip": "How often the desklet re-fetches usage from the providers."
+  },
+  "time-range": {
+    "type": "combobox",
+    "default": "24h",
+    "description": "Time range",
+    "tooltip": "The look-back window shown on the cards.",
+    "options": {
+      "Last 5 hours": "5h",
+      "Last 24 hours": "24h",
+      "Last 7 days": "7d"
+    }
+  },
+  "head-claude": {
+    "type": "header",
+    "description": "Claude (Anthropic)"
+  },
+  "claude-enabled": {
+    "type": "checkbox",
+    "default": true,
+    "description": "Show Claude usage",
+    "tooltip": "Fetch usage from the Anthropic Admin API."
+  },
+  "claude-set-key": {
+    "type": "button",
+    "description": "Enter Anthropic admin API key…",
+    "tooltip": "Stores an Anthropic organization admin key (sk-ant-admin01-…) in the GNOME keyring.",
+    "callback": "onClaudeSetKey"
+  },
+  "claude-clear-key": {
+    "type": "button",
+    "description": "Remove Anthropic API key",
+    "tooltip": "Deletes the stored Anthropic admin key from the keyring.",
+    "callback": "onClaudeClearKey"
+  },
+  "head-codex": {
+    "type": "header",
+    "description": "Codex (OpenAI)"
+  },
+  "codex-enabled": {
+    "type": "checkbox",
+    "default": true,
+    "description": "Show Codex usage",
+    "tooltip": "Fetch usage from the OpenAI Admin API."
+  },
+  "codex-set-key": {
+    "type": "button",
+    "description": "Enter OpenAI admin API key…",
+    "tooltip": "Stores an OpenAI organization admin key in the GNOME keyring.",
+    "callback": "onCodexSetKey"
+  },
+  "codex-clear-key": {
+    "type": "button",
+    "description": "Remove OpenAI API key",
+    "tooltip": "Deletes the stored OpenAI admin key from the keyring.",
+    "callback": "onCodexClearKey"
+  },
+  "head-ollama": {
+    "type": "header",
+    "description": "Ollama (cloud)"
+  },
+  "ollama-enabled": {
+    "type": "checkbox",
+    "default": true,
+    "description": "Show Ollama cloud usage",
+    "tooltip": "Fetch usage from https://ollama.com/api/usage."
+  },
+  "ollama-set-key": {
+    "type": "button",
+    "description": "Enter Ollama API key…",
+    "tooltip": "Stores your ollama.com bearer key in the GNOME keyring.",
+    "callback": "onOllamaSetKey"
+  },
+  "ollama-clear-key": {
+    "type": "button",
+    "description": "Remove Ollama API key",
+    "tooltip": "Deletes the stored Ollama key from the keyring.",
+    "callback": "onOllamaClearKey"
+  }
+}
