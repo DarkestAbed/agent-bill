@@ -1,0 +1,8 @@
+{
+  "uuid": "agent-bill@DarkestAbed",
+  "name": "Agent Bill",
+  "description": "A Linux Cinnamon desklet that surfaces an agent-based billing summary on your desktop.",
+  "version": "0.1.0",
+  "max-instances": "10",
+  "prevent-decorations": false
+}

@@ -1,0 +1,16 @@
+# Editor / OS noise
+*~
+*.swp
+*.swo
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Python (in case helpers are added later)
+__pycache__/
+*.pyc
+
+# Local-only desklet install artifacts (should not be committed)
+desklet/*/build/
