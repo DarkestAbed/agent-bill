@@ -10,18 +10,34 @@ weekly allowance, refreshed on a configurable interval against your live account
 
 ## What it shows
 
-Three provider cards in a dark theme, each with a **5-hour window** bar, **weekly usage**,
-and token/request/cost stats:
+Three provider cards in a dark theme, each with a **plan meter bar** (5-hour window %,
+or Ollama monthly allowance %), **weekly usage**, and token/request/cost stats.
+A **Refresh** button sits in the header and the desklet width is configurable
+(Cinnamon desklets are not drag-resizable — use the *Desklet width* setting).
 
-| Provider | Data source | Auth |
+Each provider accepts **two credential kinds**, picked automatically by key prefix:
+
+| Provider | Org/admin credential → shows | Plan credential → shows |
 |---|---|---|
-| **Claude** | Anthropic Admin API `GET /v1/organizations/usage_report/messages` | Org **admin API key** (`sk-ant-admin01-…`) |
-| **Codex** | OpenAI Admin API `GET /v1/organization/usage/completions` | Org **admin API key** (Bearer) |
-| **Ollama** | Ollama cloud `GET https://ollama.com/api/usage` | Bearer key |
+| **Claude** | Admin API key `sk-ant-admin01-…` → `GET /v1/organizations/usage_report/messages` (raw tokens) | Claude **plan OAuth token** → `GET /api/oauth/usage` (**5h / 7d plan %** + reset times) |
+| **Codex** | OpenAI admin key `sk-…` → `GET /v1/organization/usage/completions` (raw tokens) | ChatGPT **plan OAuth token** → `GET chatgpt.com/backend-api/wham/usage` (**5h / 7d plan %**) |
+| **Ollama** | — | cloud API key (Bearer) → `GET https://ollama.com/api/usage` (+ `/api/balance`) |
 
-> The Codex card shows **weekly tokens used**; the allowance itself is your Codex **plan's
-> weekly limit**, which the Usage API does not expose. Ollama cloud supports `24h/7d/30d`
-> ranges (the UI `5h` clamps to `24h` for Ollama).
+Where to get the **plan tokens** (paste into the desklet's own key dialog — the desklet
+never reads the CLIs' credential files):
+
+- **Claude plan token**: `claudeAiOauth.accessToken` from `~/.claude/.credentials.json`
+  (the login the `claude` CLI already uses).
+- **Codex plan token**: `tokens.access_token` from `~/.codex/auth.json` (the login the
+  `codex` CLI uses for "Sign in with ChatGPT").
+- **Ollama**: your ollama.com API key.
+
+> **Honesty rules:** a Claude Plan / ChatGPT Plan subscription is *not* readable through
+> the Anthropic/OpenAI Admin APIs (those need an organization admin key and return
+> HTTP 403 for plan users — verified). Plan usage therefore comes from the plan
+> utilization endpoints, which report **% meters**, not raw tokens. Ollama cloud on a
+> legacy plan reports **request counts only** (no tokens/cost) — the card says so
+> instead of inventing numbers. The desklet never fabricates a percentage.
 
 ## Repository layout
 
@@ -91,10 +107,11 @@ To pick up upstream changes later: `git pull`, then `install.sh` + `reload.sh`.
 
 ## Configuration (desklet settings)
 
-- **Refresh interval** (minutes, default 5)
+- **Refresh interval** (minutes, default 5) — plus a **↻ Refresh** button in the header
 - **Time range**: Last 5 hours / Last 24 hours / Last 7 days
+- **Desklet width** (pixels, default 420) — Cinnamon desklets are not drag-resizable
 - Per-provider **enable** toggles (Claude / Codex / Ollama)
-- **Enter / Remove API key** buttons per provider (stored in the keyring)
+- **Enter / Remove credential** buttons per provider (stored in the keyring)
 
 ## Testing
 

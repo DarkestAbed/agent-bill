@@ -6,12 +6,29 @@
 //     provider:   'claude' | 'codex' | 'ollama',
 //     range:      '5h' | '24h' | '7d',          // what was requested
 //     fetchedAt:  <unix ms>,
-//     tokensIn:   <number>,                       // input tokens in range
-//     tokensOut:  <number>,                       // output tokens in range
+//     tokensIn:   <number|null>,                  // input tokens in range (null = not reported)
+//     tokensOut:  <number|null>,                  // output tokens in range
 //     requests:   <number|null>,                  // request count if known
 //     costUsd:    <number|null>,                  // spend in range if known
-//     weekly:     { tokensIn, tokensOut }|null,   // 7d totals if available
+//     weekly:     { tokensIn, tokensOut, requests }|null,   // 7d totals if available
+//     plan:       null | {                       // plan "allowance" meter (5h/7d %)
+//       windowPct:    <number|null>,            // 5-hour utilization %
+//       windowResetAt:<ISO|null>,
+//       weeklyPct:    <number|null>,            // 7-day utilization %
+//       weeklyResetAt:<ISO|null>,
+//       allowancePct: <number|null>,            // Ollama: spend vs monthly allowance %
+//       note:         <string|null>,            // honest caveat, e.g. "tokens/cost not on your plan"
+//     },
 //   }
+//
+// IMPORTANT (verified 2026-10-26 against the live APIs — see
+// memory/provider-data-reality.md): a Claude PLAN / ChatGPT PLAN subscription
+// is NOT readable through the Anthropic/OpenAI Admin APIs (those need an
+// organization admin key and return HTTP 403 for plan users). Plan usage comes
+// from the CLIs' own OAuth endpoints instead, which report utilization meters
+// (5-hour / 7-day %) rather than raw tokens. Ollama cloud /api/usage reports
+// request_count on legacy plans and additionally tokens/cost on paid plans.
+// Never fabricate a percentage: if a provider gives no limit, plan.* stays null.
 
 const HOUR_MS = 3600 * 1000;
 const DAY_MS = 24 * HOUR_MS;
@@ -37,6 +54,7 @@ function buildSnapshot(provider, range, claudeData, openaiData, ollamaData) {
         requests: null,
         costUsd: null,
         weekly: null,
+        plan: null,
     };
     try {
         if (provider === 'claude')
@@ -63,47 +81,174 @@ function _sumBuckets(buckets, fn) {
     return total;
 }
 
-// ---------------- Anthropic (Admin API: usage_report/messages) ----------------
-// data[] buckets -> results[] with token fields. Weekly = last 7 daily buckets.
+// Normalize a utilization value that may arrive as 0–1 or 0–100 to 0–100.
+function _normPct(u) {
+    if (u === null || u === undefined)
+        return null;
+    const n = Number(u);
+    if (!isFinite(n))
+        return null;
+    return n <= 1 ? Math.round(n * 1000) / 10 : Math.round(n * 10) / 10;
+}
+
+function _numOrNull(x) {
+    return (x === null || x === undefined) ? null : Number(x);
+}
+
+// ---------------- Anthropic ----------------
+// Two shapes reach this function:
+//   1. Admin API usage_report/messages (org admin key): { data: [buckets] }.
+//   2. OAuth plan usage (Claude Pro/Max login): utilization meters, either
+//      legacy { five_hour:{utilization,resets_at}, seven_day:{…} } or a
+//      modern { limits: [ {type, utilization, resets_at} ] } array.
 function _fillClaude(snap, range, data) {
-    const buckets = (data && data.data) || [];
-    snap.tokensIn = _sumBuckets(buckets, (r) =>
-        (r.uncached_input_tokens || 0) +
-        (r.cache_read_input_tokens || 0) +
-        ((r.cache_creation && r.cache_creation.ephemeral_5m_input_tokens) || 0) +
-        ((r.cache_creation && r.cache_creation.ephemeral_1h_input_tokens) || 0));
-    snap.tokensOut = _sumBuckets(buckets, (r) => r.output_tokens || 0);
-    // Anthropic usage report has no request-count field.
+    if (!data)
+        return;
+    if (Array.isArray(data.data)) {
+        // Admin API — raw token buckets.
+        const buckets = data.data || [];
+        snap.tokensIn = _sumBuckets(buckets, (r) =>
+            (r.uncached_input_tokens || 0) +
+            (r.cache_read_input_tokens || 0) +
+            ((r.cache_creation && r.cache_creation.ephemeral_5m_input_tokens) || 0) +
+            ((r.cache_creation && r.cache_creation.ephemeral_1h_input_tokens) || 0));
+        snap.tokensOut = _sumBuckets(buckets, (r) => r.output_tokens || 0);
+        snap.requests = null;   // usage report has no request count
+        snap.costUsd = null;    // usage report is tokens, not cost
+        if (range === '7d')
+            snap.weekly = { tokensIn: snap.tokensIn, tokensOut: snap.tokensOut, requests: null };
+        return;
+    }
+    // OAuth plan usage endpoint — utilization meters, no raw tokens.
+    snap.plan = _planFromClaudeOAuth(data);
+    snap.tokensIn = null;
+    snap.tokensOut = null;
     snap.requests = null;
-    snap.costUsd = null; // usage report is tokens, not cost
-    // Weekly totals: caller passes a 7d payload separately; if the same
-    // payload spans 7 days we can approximate weekly = current totals.
-    if (range === '7d')
-        snap.weekly = { tokensIn: snap.tokensIn, tokensOut: snap.tokensOut };
+    snap.costUsd = null;
 }
 
-// ---------------- OpenAI (Admin API: usage/completions) ----------------
-// data[] buckets -> results[] with input_tokens/output_tokens/num_model_requests.
+function _planFromClaudeOAuth(d) {
+    const plan = { windowPct: null, windowResetAt: null, weeklyPct: null, weeklyResetAt: null, allowancePct: null, note: null };
+    let five = null, seven = null;
+    if (d.five_hour || d.seven_day) {
+        five = d.five_hour;
+        seven = d.seven_day;
+    } else if (Array.isArray(d.limits)) {
+        for (const l of d.limits) {
+            const t = String(l.type || '').toLowerCase();
+            if (t.includes('five') || t.includes('session') || t.includes('5h'))
+                five = l;
+            else if (t.includes('seven') || t.includes('weekly'))
+                seven = l;
+        }
+    }
+    if (five) {
+        plan.windowPct = _normPct(five.utilization);
+        plan.windowResetAt = five.resets_at || null;
+    }
+    if (seven) {
+        plan.weeklyPct = _normPct(seven.utilization);
+        plan.weeklyResetAt = seven.resets_at || null;
+    }
+    if (plan.windowPct === null && plan.weeklyPct === null)
+        plan.note = 'plan usage not reported';
+    return plan;
+}
+
+// ---------------- OpenAI ----------------
+// Two shapes:
+//   1. Admin API usage/completions (org admin key): { data: [buckets] }.
+//   2. ChatGPT plan meter (wham/usage, Sign-in-with-ChatGPT OAuth token):
+//      { plan_type, rate_limit: { primary_window, secondary_window } }.
+//      primary_window = 5-hour rolling (limit_window_seconds 18000),
+//      secondary_window = 7-day rolling (604800). Identify by the window
+//      seconds, not by position.
 function _fillOpenAI(snap, range, data) {
-    const buckets = (data && data.data) || [];
-    snap.tokensIn = _sumBuckets(buckets, (r) => r.input_tokens || 0);
-    snap.tokensOut = _sumBuckets(buckets, (r) => r.output_tokens || 0);
-    snap.requests = _sumBuckets(buckets, (r) => r.num_model_requests || 0);
-    snap.costUsd = null; // usage endpoint is tokens, not cost
-    if (range === '7d')
-        snap.weekly = { tokensIn: snap.tokensIn, tokensOut: snap.tokensOut };
+    if (!data)
+        return;
+    if (Array.isArray(data.data)) {
+        const buckets = data.data || [];
+        snap.tokensIn = _sumBuckets(buckets, (r) => r.input_tokens || 0);
+        snap.tokensOut = _sumBuckets(buckets, (r) => r.output_tokens || 0);
+        snap.requests = _sumBuckets(buckets, (r) => r.num_model_requests || 0);
+        snap.costUsd = null; // usage endpoint is tokens, not cost
+        if (range === '7d')
+            snap.weekly = { tokensIn: snap.tokensIn, tokensOut: snap.tokensOut, requests: snap.requests };
+        return;
+    }
+    snap.plan = _planFromWham(data);
+    snap.tokensIn = null;
+    snap.tokensOut = null;
+    snap.requests = null;
+    snap.costUsd = null;
 }
 
-// ---------------- Ollama cloud (/api/usage) ----------------
-// totals: { request_count, usage_usd, input_tokens, cached_input_tokens, output_tokens }
+function _planFromWham(d) {
+    const plan = { windowPct: null, windowResetAt: null, weeklyPct: null, weeklyResetAt: null, allowancePct: null, note: null };
+    const rl = d && d.rate_limit;
+    if (rl) {
+        const pw = rl.primary_window;
+        const sw = rl.secondary_window;
+        if (pw) {
+            plan.windowPct = _numOrNull(pw.used_percent);
+            plan.windowResetAt = pw.reset_at || null;
+        }
+        if (sw) {
+            plan.weeklyPct = _numOrNull(sw.used_percent);
+            plan.weeklyResetAt = sw.reset_at || null;
+        }
+    }
+    if (plan.windowPct === null && plan.weeklyPct === null)
+        plan.note = 'plan usage not reported';
+    return plan;
+}
+
+// ---------------- Ollama cloud (/api/usage + /api/balance) ----------------
+// Real shape (verified 2026-10-26): { range, scope, granularity, from, until,
+//   totals: { request_count, [input_tokens, cached_input_tokens, output_tokens,
+//             usage_usd on PAID plans only] },
+//   buckets: [ { from, until, request_count, … } ] }
+// The provider merges three calls into { range, weekly, balance } so the
+// weekly line is always populated (Ollama has no 5h range) and the allowance %
+// is shown when the plan exposes /api/balance.
 function _fillOllama(snap, range, data) {
-    const totals = (data && data.totals) || {};
-    snap.tokensIn = totals.input_tokens || 0;
-    snap.tokensOut = totals.output_tokens || 0;
+    const rangePayload = (data && data.range) || data || {};
+    const weeklyPayload = (data && data.weekly) || null;
+    const balance = (data && data.balance) || null;
+
+    const totals = rangePayload.totals || {};
     snap.requests = (totals.request_count !== undefined) ? totals.request_count : null;
+    snap.tokensIn = (totals.input_tokens !== undefined) ? totals.input_tokens : null;
+    snap.tokensOut = (totals.output_tokens !== undefined) ? totals.output_tokens : null;
     snap.costUsd = (totals.usage_usd !== undefined) ? totals.usage_usd : null;
-    if (range === '7d')
-        snap.weekly = { tokensIn: snap.tokensIn, tokensOut: snap.tokensOut };
+
+    // Weekly: prefer the explicit 7d payload; if the range is already 7d the
+    // same payload serves as weekly.
+    const wTotals = (weeklyPayload && weeklyPayload.totals) || (range === '7d' ? totals : null);
+    if (wTotals) {
+        snap.weekly = {
+            tokensIn: (wTotals.input_tokens !== undefined) ? wTotals.input_tokens : 0,
+            tokensOut: (wTotals.output_tokens !== undefined) ? wTotals.output_tokens : 0,
+            requests: (wTotals.request_count !== undefined) ? wTotals.request_count : null,
+        };
+    }
+
+    const plan = { windowPct: null, windowResetAt: null, weeklyPct: null, weeklyResetAt: null, allowancePct: null, note: null };
+    const notes = [];
+    const hasTokens = (totals.input_tokens !== undefined) || (totals.usage_usd !== undefined);
+    if (!hasTokens)
+        notes.push('tokens/cost not on your plan');
+    if (balance && balance.included &&
+        typeof balance.included.allowance_usd === 'number' && balance.included.allowance_usd > 0) {
+        const allowance = balance.included.allowance_usd;
+        const remaining = (typeof balance.included.balance_usd === 'number')
+            ? balance.included.balance_usd : allowance;
+        plan.allowancePct = Math.round(Math.max(0, Math.min(100, ((allowance - remaining) / allowance) * 100)) * 10) / 10;
+    } else {
+        notes.push('no allowance reported');
+    }
+    plan.note = notes.length ? notes.join(' · ') : null;
+    snap.plan = plan;
 }
 
 // Map our UI range to the provider-native range/width.

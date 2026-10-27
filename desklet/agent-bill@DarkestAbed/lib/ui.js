@@ -1,5 +1,16 @@
 // agent-bill — UI widget library (dark-theme building blocks, dark-mode only).
 // All visual pieces are constructed here so desklet.js stays declarative.
+//
+// Layout/sizing rules learned on Cinnamon 6.6 (see memory/cinnamon-6-gotchas.md
+// and memory/provider-data-reality.md):
+//   - Clutter 6 aborts the WHOLE SHELL if an actor reaches dispose while still
+//     parented → update in place, never swap/remove actors. The usage bar uses
+//     FIXED PIXEL widths (Clutter actor.set_size) because St does not support
+//     percentage lengths ("St-WARNING: percentage lengths not currently
+//     supported") — a % CSS width is silently ignored.
+//   - Desklets have no drag-resize; the desklet controls its own width/height
+//     (stock photoframe@cinnamon.org applies settings width/height via
+//     actor.set_size — desklet.js does this on its root actor).
 
 const St = imports.gi.St;
 const Pango = imports.gi.Pango;
@@ -19,6 +30,10 @@ const COLORS = {
     codex:      '#7aa2f7',
     ollama:     '#bb9af7',
 };
+
+// Track (full width) for the usage bar. The desklet passes the current pixel
+// width on every setPercent() so the fill width is exact — no % CSS.
+const BAR_HEIGHT = 10;
 
 function colorFor(provider) {
     switch (provider) {
@@ -43,25 +58,28 @@ function makeLabel(text, opts = {}) {
 }
 
 // A horizontal usage bar: a track with a filled portion and a % label.
-// The fill width is driven by a plain style string on `inner`, so setPercent()
-// can update the bar IN PLACE — no actor is ever removed, re-parented or
-// destroyed. (Clutter 6 aborts the whole shell if an actor reaches dispose
-// with a non-NULL parent — see cinnamon-6-gotchas.md.)
-function makeUsageBar(percent) {
+// The fill width is a FIXED PIXEL size (Clutter actor property, not CSS) so
+// setPercent() updates the bar IN PLACE — no actor is ever removed,
+// re-parented or destroyed, and no % CSS (which Cinnamon silently ignores).
+// @trackPx = current allocated width of the track in pixels; pass the bar
+// actor's measured width each refresh (bar.actor.get_width()).
+function makeUsageBar(percent, trackPx) {
     const clamped = Math.max(0, Math.min(100, percent || 0));
+    const px = Math.max(0, Math.floor((trackPx || 200) * clamped / 100));
 
     // Track: solid background, expands to fill available width.
     const track = new St.Bin({
-        style: `background-color: ${COLORS.track}; border-radius: 6px; height: 10px;`,
+        style: `background-color: ${COLORS.track}; border-radius: 6px; height: ${BAR_HEIGHT}px;`,
         x_expand: true,
     });
 
-    // Fill: same height, width is a % of the track via CSS on `inner`.
+    // Fill: fixed pixel width = share of the track. Height matches the track.
     const fillActor = new St.Bin({
-        style: `background-color: ${_barColor(clamped)}; border-radius: 6px; height: 10px;`,
-        x_expand: true,
+        style: `background-color: ${_barColor(clamped)}; border-radius: 6px; height: ${BAR_HEIGHT}px;`,
+        x_expand: false,
     });
-    const inner = new St.BoxLayout({ x_expand: true, style: `width: ${clamped}%;` });
+    fillActor.set_size(px, BAR_HEIGHT);
+    const inner = new St.BoxLayout({ x_expand: false });
     inner.add_child(fillActor);
     track.set_child(inner); // St.Bin.set_child — properly unparents the old child
 
@@ -74,12 +92,12 @@ function makeUsageBar(percent) {
     return {
         actor: row,
         _fill: fillActor,
-        _inner: inner,
         _pctLabel: pctLabel,
-        setPercent(p) {
+        setPercent(p, trackPx2) {
             const c = Math.max(0, Math.min(100, p || 0));
-            this._inner.style = `width: ${c}%;`;
-            this._fill.style = `background-color: ${_barColor(c)}; border-radius: 6px; height: 10px;`;
+            const w = Math.max(0, Math.floor(((trackPx2 === undefined ? trackPx : trackPx2) || 200) * c / 100));
+            this._fill.set_size(w, BAR_HEIGHT);
+            this._fill.style = `background-color: ${_barColor(c)}; border-radius: 6px; height: ${BAR_HEIGHT}px;`;
             this._pctLabel.set_text(`${Math.round(c)}%`);
         },
     };
@@ -87,6 +105,18 @@ function makeUsageBar(percent) {
 
 function _barColor(clamped) {
     return clamped >= 90 ? COLORS.bad : clamped >= 70 ? COLORS.warn : COLORS.good;
+}
+
+// A small clickable button (used for the header Refresh button).
+function makeButton(label, opts = {}) {
+    const btn = new St.Button({
+        label,
+        can_focus: true,
+        style: `background-color: ${opts.bg || COLORS.surface}; color: ${opts.color || COLORS.text};` +
+               `border: 1px solid ${COLORS.track}; border-radius: 8px; padding: 4px 12px;` +
+               (opts.bold ? 'font-weight: bold;' : ''),
+    });
+    return btn;
 }
 
 // A single line of "name: value" stats.
@@ -99,7 +129,7 @@ function makeStatLine(name, value, opts = {}) {
     return { actor: box, valueLabel: valLbl };
 }
 
-// A provider card: title, status dot, 5h-window bar, weekly usage, footer.
+// A provider card: title, plan meter bar, weekly usage, stats, footer.
 function makeProviderCard(providerId, providerLabel) {
     const accent = colorFor(providerId);
 
@@ -122,10 +152,11 @@ function makeProviderCard(providerId, providerLabel) {
     header.add_child(headerSpacer);
     card.add_child(header);
 
-    // 5-hour window bar section
-    const fiveHrTitle = makeLabel('5-hour window', { size: 11, dim: true });
-    card.add_child(fiveHrTitle);
-    const bar = makeUsageBar(0);
+    // Plan meter bar section (5-hour window for plan users; allowance % for
+    // Ollama when reported). The bar title is set per-render.
+    const barTitle = makeLabel('5-hour window', { size: 11, dim: true });
+    card.add_child(barTitle);
+    const bar = makeUsageBar(0, 200);
     card.add_child(bar.actor);
 
     // Weekly usage line
@@ -144,7 +175,7 @@ function makeProviderCard(providerId, providerLabel) {
     stats.add_child(statCost.actor);
     card.add_child(stats);
 
-    // Footer: last updated / error
+    // Footer: last updated / error / plan note
     const footer = makeLabel('', { size: 11, dim: true });
     card.add_child(footer);
 
@@ -152,6 +183,7 @@ function makeProviderCard(providerId, providerLabel) {
         providerId,
         actor: card,
         _dot: dot,
+        _barTitle: barTitle,
         _bar: bar,
         _weekly: weekly,
         _statIn: statIn,
@@ -169,29 +201,55 @@ function makeProviderCard(providerId, providerLabel) {
 
         render(snapshot, rangeLabel) {
             this.setStatus('ok');
-            const fmt = (n) => (n === null || n === undefined) ? '—' : _formatTokens(n);
+            const fmt = (n) => (n === null || n === undefined) ? 'n/a' : _formatTokens(n);
             this._statIn.valueLabel.set_text(fmt(snapshot.tokensIn));
             this._statOut.valueLabel.set_text(fmt(snapshot.tokensOut));
             this._statReq.valueLabel.set_text(snapshot.requests === null ? '—' : _formatNumber(snapshot.requests));
             this._statCost.valueLabel.set_text(snapshot.costUsd === null ? '—' : `$${snapshot.costUsd.toFixed(2)}`);
+
+            // Weekly line: always populated for Ollama (separate 7d fetch);
+            // for token providers only when the selected range is 7d.
             if (snapshot.weekly) {
-                this._weekly.valueLabel.set_text(
-                    `${_formatTokens(snapshot.weekly.tokensIn)} in / ${_formatTokens(snapshot.weekly.tokensOut)} out`);
+                const parts = [];
+                if (snapshot.weekly.tokensIn)
+                    parts.push(`${_formatTokens(snapshot.weekly.tokensIn)} in / ${_formatTokens(snapshot.weekly.tokensOut)} out`);
+                if (snapshot.weekly.requests !== null && snapshot.weekly.requests !== undefined)
+                    parts.push(`${_formatNumber(snapshot.weekly.requests)} reqs`);
+                this._weekly.valueLabel.set_text(parts.length ? parts.join(' · ') : '—');
             } else {
-                this._weekly.valueLabel.set_text('see plan for allowance');
+                this._weekly.valueLabel.set_text('select 7d range for weekly');
             }
-            // The 5h-window bar percentage is provider-specific; the desklet
-            // supplies it via renderBar(). Default 0 here.
+
+            // Footer: updated time, range, plan weekly % (when the plan
+            // reports one), and any honest caveat (e.g. Ollama legacy plan
+            // has no tokens/cost).
             const updated = new Date(snapshot.fetchedAt);
-            this._footer.set_text(`updated ${_formatTime(updated)} · range ${rangeLabel}`);
+            let footerText = `updated ${_formatTime(updated)} · range ${rangeLabel}`;
+            if (snapshot.plan && snapshot.plan.weeklyPct !== null && snapshot.plan.weeklyPct !== undefined)
+                footerText += ` · weekly ${Math.round(snapshot.plan.weeklyPct)}%`;
+            const note = snapshot.plan && snapshot.plan.note;
+            if (note)
+                footerText += ` · ${note}`;
+            this._footer.set_text(footerText);
         },
 
-        renderBar(percent) {
+        // Current measured width of the bar row, in pixels. The desklet passes
+        // this to renderBar() so the fill width is computed exactly.
+        barWidth() {
+            return this._bar.actor.get_width() || 200;
+        },
+
+        // @percent: plan meter fill (5h window % or Ollama allowance %).
+        // @trackPx: current pixel width of the bar row (for exact fill width).
+        // @title: bar label, e.g. "5-hour window" or "monthly allowance".
+        renderBar(percent, trackPx, title) {
+            if (title)
+                this._barTitle.set_text(title);
             // Update the existing bar in place. NEVER remove/re-insert/destroy
             // the bar actor here — Clutter 6 aborts the whole shell with
             // "clutter_actor_dispose: assertion failed: (priv->parent == NULL)"
             // if an actor reaches dispose while still parented.
-            this._bar.setPercent(percent);
+            this._bar.setPercent(percent, trackPx);
         },
 
         renderError(message) {

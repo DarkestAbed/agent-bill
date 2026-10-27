@@ -11,7 +11,7 @@
     "step": 1,
     "units": "minutes",
     "description": "Refresh interval",
-    "tooltip": "How often the desklet re-fetches usage from the providers."
+    "tooltip": "How often the desklet re-fetches usage from the providers. There is also a Refresh button in the header."
   },
   "time-range": {
     "type": "combobox",
@@ -24,6 +24,16 @@
       "Last 7 days": "7d"
     }
   },
+  "desklet-width": {
+    "type": "spinbutton",
+    "default": 420,
+    "min": 240,
+    "max": 1600,
+    "step": 20,
+    "units": "pixels",
+    "description": "Desklet width",
+    "tooltip": "Width of the desklet in pixels. Cinnamon desklets are not drag-resizable; set a width here (default 420 for roomier cards)."
+  },
   "head-claude": {
     "type": "header",
     "description": "Claude (Anthropic)"
@@ -32,18 +42,18 @@
     "type": "checkbox",
     "default": true,
     "description": "Show Claude usage",
-    "tooltip": "Fetch usage from the Anthropic Admin API."
+    "tooltip": "Fetch usage for Claude. Plan logins show the 5-hour / 7-day plan meters; org admin keys show raw token usage."
   },
   "claude-set-key": {
     "type": "button",
-    "description": "Enter Anthropic admin API key…",
-    "tooltip": "Stores an Anthropic organization admin key (sk-ant-admin01-…) in the GNOME keyring.",
+    "description": "Enter Claude credential…",
+    "tooltip": "Stores an Anthropic org admin API key (sk-ant-admin01-…) OR your Claude plan OAuth access token in the GNOME keyring. Plan logins show your real 5h/weekly usage.",
     "callback": "onClaudeSetKey"
   },
   "claude-clear-key": {
     "type": "button",
-    "description": "Remove Anthropic API key",
-    "tooltip": "Deletes the stored Anthropic admin key from the keyring.",
+    "description": "Remove Claude credential",
+    "tooltip": "Deletes the stored Claude credential from the keyring.",
     "callback": "onClaudeClearKey"
   },
   "head-codex": {
@@ -54,18 +64,18 @@
     "type": "checkbox",
     "default": true,
     "description": "Show Codex usage",
-    "tooltip": "Fetch usage from the OpenAI Admin API."
+    "tooltip": "Fetch usage for Codex. ChatGPT plan logins show the 5-hour / 7-day plan meters; org admin keys show raw token usage."
   },
   "codex-set-key": {
     "type": "button",
-    "description": "Enter OpenAI admin API key…",
-    "tooltip": "Stores an OpenAI organization admin key in the GNOME keyring.",
+    "description": "Enter Codex credential…",
+    "tooltip": "Stores an OpenAI org admin API key (sk-…) OR your ChatGPT plan OAuth access token (tokens.access_token from ~/.codex/auth.json) in the GNOME keyring.",
     "callback": "onCodexSetKey"
   },
   "codex-clear-key": {
     "type": "button",
-    "description": "Remove OpenAI API key",
-    "tooltip": "Deletes the stored OpenAI admin key from the keyring.",
+    "description": "Remove Codex credential",
+    "tooltip": "Deletes the stored Codex credential from the keyring.",
     "callback": "onCodexClearKey"
   },
   "head-ollama": {
@@ -76,7 +86,7 @@
     "type": "checkbox",
     "default": true,
     "description": "Show Ollama cloud usage",
-    "tooltip": "Fetch usage from https://ollama.com/api/usage."
+    "tooltip": "Fetch usage from https://ollama.com/api/usage (requests; tokens/cost on paid plans) and /api/balance (allowance %)."
   },
   "ollama-set-key": {
     "type": "button",

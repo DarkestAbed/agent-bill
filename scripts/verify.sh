@@ -135,6 +135,27 @@ else
     ok "desklet.js has _destroyed lifecycle guard"
 fi
 
+# 7g. No percentage CSS widths on St actors. Cinnamon's St does NOT support
+# percentage lengths ("St-WARNING: percentage lengths not currently supported")
+# — a `width: N%` style is silently ignored and the usage bar renders wrong.
+# Use fixed pixel sizes (Clutter actor.set_size) instead.
+if grep -rInE 'width:\s*[0-9.]+%' "$DESKLET_DIR" 2>/dev/null | grep -vE ':\s*//' | grep -qE 'width:\s*[0-9.]+%'; then
+    bad "percentage CSS width found — St ignores % lengths, use set_size(px) instead"
+    grep -rInE 'width:\s*[0-9.]+%' "$DESKLET_DIR" | grep -vE ':\s*//' || true
+else
+    ok "no percentage CSS widths (St ignores them; pixel set_size used instead)"
+fi
+
+# 7h. Fetch errors must be surfaced on the card. A rejected provider fetch
+# used to be silently skipped (card stuck on "waiting for first refresh…"
+# forever — hid the Anthropic 403 for plan users). desklet.js must render the
+# error, not swallow it.
+if grep -q "renderError(this._errorText" "$DESKLET_DIR/desklet.js"; then
+    ok "desklet.js surfaces fetch errors on the card (renderError)"
+else
+    bad "desklet.js does not surface fetch errors on the card (rejected fetches are silently skipped)"
+fi
+
 # 8. Unit tests (node --test) for the pure-logic module lib/usage.js.
 if command -v node >/dev/null 2>&1; then
     if node --test "$REPO"/tests/*.test.js >/tmp/agent-bill-tests.log 2>&1; then

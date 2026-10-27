@@ -2,6 +2,22 @@
 // A dark-mode, one-stop usage dashboard for Claude (Anthropic), Codex
 // (OpenAI) and Ollama (cloud). Refreshes on a configurable interval, reads
 // credentials from the GNOME keyring, never blocks the UI (async libsoup3).
+//
+// Credential model (verified 2026-10-26 — see memory/provider-data-reality.md):
+//   - Claude: an Anthropic ORG ADMIN key (sk-ant-admin01-…) reads the Admin
+//     usage report; a Claude PLAN OAuth access token (pasted by the user)
+//     reads the plan 5h/7d utilization meters. The two are discriminated by
+//     key prefix in providers/claude.js.
+//   - Codex: an OpenAI ORG ADMIN key reads the Admin usage API; a ChatGPT
+//     PLAN OAuth access token (pasted by the user) reads the plan 5h/7d
+//     utilization meters. Discriminated by key prefix in providers/codex.js.
+//   - Ollama: a cloud API key (Bearer) reads /api/usage + /api/balance.
+// The desklet NEVER reads the CLIs' own credential files — tokens are entered
+// by the user into the desklet's own keyring entry.
+//
+// Resizing: Cinnamon desklets have no drag-resize; the user sets a pixel
+// width in settings (stock photoframe@cinnamon.org pattern) and we apply it
+// to the root actor with set_size(). Default 420px ("thicker" cards).
 
 const Desklet = imports.ui.desklet;
 const St = imports.gi.St;
@@ -34,6 +50,10 @@ const DESKLET_CSS = `
     color: #e6e6ef;
 `;
 
+// Default desklet width in pixels. Applied to the root actor via set_size so
+// the cards get a thicker, roomier layout than the old natural-width squeeze.
+const DEFAULT_WIDTH = 420;
+
 class AgentBillDesklet extends Desklet.Desklet {
     constructor(metadata, deskletId) {
         super(metadata, deskletId);
@@ -57,6 +77,8 @@ class AgentBillDesklet extends Desklet.Desklet {
         this.settings.bindProperty(Settings.BindingDirection.IN,
             'time-range', 'timeRange', this._onSettingsChanged.bind(this));
         this.settings.bindProperty(Settings.BindingDirection.IN,
+            'desklet-width', 'deskletWidth', this._onWidthChanged.bind(this));
+        this.settings.bindProperty(Settings.BindingDirection.IN,
             'claude-enabled', 'claudeEnabled', this._onSettingsChanged.bind(this));
         this.settings.bindProperty(Settings.BindingDirection.IN,
             'codex-enabled', 'codexEnabled', this._onSettingsChanged.bind(this));
@@ -66,8 +88,10 @@ class AgentBillDesklet extends Desklet.Desklet {
         // Defaults if schema not yet bound.
         if (!this.refreshInterval) this.refreshInterval = 5;
         if (!this.timeRange) this.timeRange = '24h';
+        if (!this.deskletWidth) this.deskletWidth = DEFAULT_WIDTH;
 
         this._buildLayout();
+        this._applyWidth();
     }
 
     // ---------------- UI ----------------
@@ -77,12 +101,19 @@ class AgentBillDesklet extends Desklet.Desklet {
             style: DESKLET_CSS,
             x_expand: true,
         });
+        this._root = root;
 
-        // Header row: live dot + title + range + settings hint
+        // Header row: live dot + title + refresh button + range
         this._liveDot = new St.Bin({
             style: 'background-color: #9a9ab0; border-radius: 50%; width: 10px; height: 10px;',
         });
         const title = Ui.makeLabel('Agent Bill', { size: 18, bold: true });
+        this._refreshButton = Ui.makeButton('↻ Refresh', { bg: '#2a2a3c' });
+        this._refreshButton.connect('clicked', () => {
+            if (this._destroyed)
+                return;
+            this._scheduleRefresh(0);
+        });
         const spacer = new St.Bin({ x_expand: true });
         this._rangeLabel = Ui.makeLabel(RANGE_LABELS[this.timeRange] || this.timeRange,
             { size: 12, dim: true });
@@ -90,6 +121,7 @@ class AgentBillDesklet extends Desklet.Desklet {
         header.add_child(this._liveDot);
         header.add_child(title);
         header.add_child(spacer);
+        header.add_child(this._refreshButton);
         header.add_child(this._rangeLabel);
         root.add_child(header);
 
@@ -109,6 +141,21 @@ class AgentBillDesklet extends Desklet.Desklet {
             this._addCard(provider);
 
         this.setContent(root);
+    }
+
+    // Cinnamon desklets have no drag-resize; the user sets a pixel width in
+    // settings and we apply it to the content root actor (the canonical
+    // photoframe@cinnamon.org pattern: content actor .set_size(width, height)).
+    // The desklet's natural width then follows the content root.
+    _applyWidth() {
+        if (this._destroyed || !this._root)
+            return;
+        const w = Math.max(200, Math.min(2000, Number(this.deskletWidth) || DEFAULT_WIDTH));
+        this._root.set_size(w, -1);
+    }
+
+    _onWidthChanged() {
+        this._applyWidth();
     }
 
     _addCard(provider) {
@@ -136,36 +183,54 @@ class AgentBillDesklet extends Desklet.Desklet {
     }
 
     // ---------------- settings callbacks (the "Enter API key" buttons) ----
-    onClaudeSetKey() { this._promptForKey(ClaudeProvider, 'Anthropic admin API key (sk-ant-admin01-…)'); }
-    onCodexSetKey()  { this._promptForKey(CodexProvider, 'OpenAI admin API key'); }
-    onOllamaSetKey() { this._promptForKey(OllamaProvider, 'Ollama cloud API key'); }
+    onClaudeSetKey() {
+        KeyDialog.showKeyDialog({
+            title: 'Enter Claude credential',
+            description: 'Paste EITHER an Anthropic organization admin API key (sk-ant-admin01-…) ' +
+                         'OR your Claude plan OAuth access token (from ~/.claude/.credentials.json, ' +
+                         'claudeAiOauth.accessToken — the same login the claude CLI uses). ' +
+                         'It is stored encrypted in the GNOME keyring and never written to disk in plaintext.',
+            onSubmit: (key) => this._storeKey(ClaudeProvider, key),
+        });
+    }
+    onCodexSetKey() {
+        KeyDialog.showKeyDialog({
+            title: 'Enter Codex credential',
+            description: 'Paste EITHER an OpenAI organization admin API key (sk-…) ' +
+                         'OR your ChatGPT plan OAuth access token (from ~/.codex/auth.json, ' +
+                         'tokens.access_token — the same login the codex CLI uses for "Sign in with ChatGPT"). ' +
+                         'It is stored encrypted in the GNOME keyring and never written to disk in plaintext.',
+            onSubmit: (key) => this._storeKey(CodexProvider, key),
+        });
+    }
+    onOllamaSetKey() {
+        KeyDialog.showKeyDialog({
+            title: 'Enter Ollama cloud API key',
+            description: 'Paste your ollama.com API key. It is stored encrypted in the GNOME keyring and never written to disk in plaintext.',
+            onSubmit: (key) => this._storeKey(OllamaProvider, key),
+        });
+    }
+
+    _storeKey(provider, key) {
+        Keyring.storeKey(provider.id, key).then((ok) => {
+            if (this._destroyed) return; // dialog outlived the desklet
+            this._footerLabel.set_text(ok
+                ? `${provider.label} credential saved to keyring.`
+                : `Failed to save ${provider.label} credential.`);
+            this._scheduleRefresh(0); // refresh immediately
+        });
+    }
 
     onClaudeClearKey() { this._clearKey(ClaudeProvider); }
     onCodexClearKey()  { this._clearKey(CodexProvider); }
     onOllamaClearKey() { this._clearKey(OllamaProvider); }
 
-    _promptForKey(provider, what) {
-        KeyDialog.showKeyDialog({
-            title: `Enter ${provider.label} key`,
-            description: `Paste your ${what}. It is stored encrypted in the GNOME keyring and never written to disk in plaintext.`,
-            onSubmit: (key) => {
-                Keyring.storeKey(provider.id, key).then((ok) => {
-                    if (this._destroyed) return; // dialog outlived the desklet
-                    this._footerLabel.set_text(ok
-                        ? `${provider.label} key saved to keyring.`
-                        : `Failed to save ${provider.label} key.`);
-                    this._scheduleRefresh(0); // refresh immediately
-                });
-            },
-        });
-    }
-
     _clearKey(provider) {
         Keyring.clearKey(provider.id).then((ok) => {
             if (this._destroyed) return;
             this._footerLabel.set_text(ok
-                ? `${provider.label} key removed.`
-                : `Failed to remove ${provider.label} key.`);
+                ? `${provider.label} credential removed.`
+                : `Failed to remove ${provider.label} credential.`);
         });
     }
 
@@ -224,15 +289,19 @@ class AgentBillDesklet extends Desklet.Desklet {
             return; // don't overlap fetches; bail if desklet is gone
         this._refreshing = true;
         this._liveDot.style = 'background-color: #f9e2af; border-radius: 50%; width: 10px; height: 10px;'; // amber = working
+        if (this._refreshButton)
+            this._refreshButton.set_label('↻ …');
 
         const range = this.timeRange || '24h';
         const providers = this._enabledProviders();
 
         const tasks = providers.map((provider) =>
-            this._fetchOne(provider, range).then((snapshot) => ({ provider, snapshot }))
+            this._fetchOne(provider, range)
+                .then((snapshot) => ({ provider, snapshot, ok: true }))
+                .catch((err) => ({ provider, err, ok: false }))
         );
 
-        Promise.allSettled(tasks).then((results) => {
+        Promise.all(tasks).then((results) => {
             // The desklet may have been removed/reloaded while the HTTP
             // requests were in flight. Touching actors now would operate on
             // disposed Clutter actors — guard with _destroyed.
@@ -241,19 +310,28 @@ class AgentBillDesklet extends Desklet.Desklet {
                 return;
             }
             for (const result of results) {
-                if (result.status !== 'fulfilled')
-                    continue;
-                const { provider, snapshot } = result.value;
-                this._snapshots.set(provider.id, snapshot);
+                const { provider } = result;
                 const card = this._cards.get(provider.id);
-                if (card) {
+                if (!card)
+                    continue;
+                if (result.ok) {
+                    const snapshot = result.snapshot;
+                    this._snapshots.set(provider.id, snapshot);
                     card.render(snapshot, RANGE_LABELS[range] || range);
-                    card.renderBar(this._windowPercent(provider.id, snapshot, range));
+                    const bp = this._barParams(provider.id, snapshot, range);
+                    card.renderBar(bp.percent, card.barWidth(), bp.title);
                     card.setStatus('ok');
+                } else {
+                    // SURFACE the error on the card — a rejected fetch must
+                    // never leave the card stuck on "waiting for first
+                    // refresh…" (that is what hid the Anthropic 403).
+                    card.renderError(this._errorText(provider.id, result.err));
                 }
             }
             this._refreshing = false;
             this._liveDot.style = 'background-color: #a6e3a1; border-radius: 50%; width: 10px; height: 10px;'; // green = done
+            if (this._refreshButton)
+                this._refreshButton.set_label('↻ Refresh');
             this._footerLabel.set_text(`last refresh ${new Date().toLocaleTimeString('en-US')}`);
             this._scheduleRefresh(); // next tick
         });
@@ -261,13 +339,8 @@ class AgentBillDesklet extends Desklet.Desklet {
 
     _fetchOne(provider, range) {
         const key = Keyring.lookupKey(provider.id);
-        if (!key) {
-            if (!this._destroyed) {
-                const card = this._cards.get(provider.id);
-                if (card) card.renderError('no API key — open settings to add one');
-            }
-            return Promise.reject(new Error('no key'));
-        }
+        if (!key)
+            return Promise.reject(new Error('no credential — open settings to add one'));
         return provider.fetchUsage(range, key)
             .then((raw) => Usage.buildSnapshot(provider.id, range,
                 provider.id === 'claude' ? raw : null,
@@ -275,21 +348,42 @@ class AgentBillDesklet extends Desklet.Desklet {
                 provider.id === 'ollama' ? raw : null));
     }
 
-    // The 5-hour-window bar percentage. Provider APIs don't expose a live
-    // "5h limit", so we show the share of the selected range consumed in the
-    // most recent 5 hours as a proxy for "how hot is the current window".
-    _windowPercent(providerId, snapshot, range) {
-        if (!snapshot || !snapshot.tokensIn)
-            return 0;
-        if (providerId === 'ollama') {
-            // Ollama cloud: no 5h concept; show cost-based fill as a visual.
-            return snapshot.costUsd ? Math.min(100, snapshot.costUsd * 10) : 0;
+    // Human-readable, actionable error text per provider.
+    _errorText(providerId, err) {
+        const status = err && err.status;
+        if (status === 401 || status === 403) {
+            if (providerId === 'claude')
+                return 'credential rejected (403/401) — a Claude PLAN login works here; an org admin key needs an Anthropic organization';
+            if (providerId === 'codex')
+                return 'credential rejected (403/401) — paste your ChatGPT plan access token, or an OpenAI org admin key';
+            return 'API key rejected (401/403)';
         }
-        // For token providers, we don't have a hard 5h cap; approximate the
-        // bar by relative magnitude against the weekly totals when present.
-        if (snapshot.weekly && snapshot.weekly.tokensIn)
-            return (snapshot.tokensIn / Math.max(1, snapshot.weekly.tokensIn)) * 100;
-        return 0;
+        if (status === 429)
+            return `rate limited — retry in ${err.retryAfterSeconds || 60}s`;
+        if (err && err.message)
+            return err.message.length > 90 ? err.message.slice(0, 87) + '…' : err.message;
+        return 'fetch failed';
+    }
+
+    // The plan-meter bar parameters for a card. Returns { percent, title }.
+    //   - Claude/Codex PLAN token: 5-hour window % (the plan's real meter);
+    //     weekly % is shown on the card footer text.
+    //   - Claude/Codex ADMIN key (raw tokens): no plan meter exists → 0 and a
+    //     neutral title.
+    //   - Ollama: monthly allowance % when /api/balance reports one,
+    //     otherwise 0 (the honest data is the Reqs stat + Weekly line; we
+    //     never fabricate a %).
+    _barParams(providerId, snapshot, range) {
+        if (providerId === 'ollama') {
+            if (snapshot.plan && snapshot.plan.allowancePct !== null && snapshot.plan.allowancePct !== undefined)
+                return { percent: snapshot.plan.allowancePct, title: 'monthly allowance' };
+            return { percent: 0, title: 'requests (no allowance reported)' };
+        }
+        // Token plans (Claude/Codex OAuth): 5h window %.
+        if (snapshot.plan && snapshot.plan.windowPct !== null && snapshot.plan.windowPct !== undefined)
+            return { percent: snapshot.plan.windowPct, title: '5-hour window' };
+        // Admin-key token providers: tokens shown, no plan meter.
+        return { percent: 0, title: 'usage (no plan meter)' };
     }
 
     // ---------------- lifecycle ----------------
