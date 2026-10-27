@@ -20,7 +20,7 @@ echo "== agent-bill verify =="
 # 1. Required files exist
 for f in metadata.json desklet.js settings-schema.json \
          providers/base.js providers/claude.js providers/codex.js providers/ollama.js \
-         lib/http.js lib/keyring.js lib/usage.js lib/ui.js lib/keydialog.js; do
+         lib/http.js lib/keyring.js lib/usage.js lib/ui.js lib/keydialog.js lib/localauth.js; do
     if [[ -f "$DESKLET_DIR/$f" ]]; then ok "file exists: $f"; else bad "missing file: $f"; fi
 done
 
@@ -137,13 +137,14 @@ fi
 
 # 7g. No percentage CSS widths on St actors. Cinnamon's St does NOT support
 # percentage lengths ("St-WARNING: percentage lengths not currently supported")
-# — a `width: N%` style is silently ignored and the usage bar renders wrong.
+# — a `width: N%` or `border-radius: 50%` style is silently ignored (and
+# logged on every repaint).
 # Use fixed pixel sizes (Clutter actor.set_size) instead.
-if grep -rInE 'width:\s*[0-9.]+%' "$DESKLET_DIR" 2>/dev/null | grep -vE ':\s*//' | grep -qE 'width:\s*[0-9.]+%'; then
-    bad "percentage CSS width found — St ignores % lengths, use set_size(px) instead"
-    grep -rInE 'width:\s*[0-9.]+%' "$DESKLET_DIR" | grep -vE ':\s*//' || true
+if grep -rInE '(width|height|radius|padding|margin|spacing|size):\s*[0-9.]+%' "$DESKLET_DIR" 2>/dev/null | grep -vE ':\s*//' | grep -qE '(width|height|radius|padding|margin|spacing|size):\s*[0-9.]+%'; then
+    bad "percentage CSS length found (width/radius/…) — St ignores % lengths, use set_size(px) instead"
+    grep -rInE '(width|height|radius|padding|margin|spacing|size):\s*[0-9.]+%' "$DESKLET_DIR" | grep -vE ':\s*//' || true
 else
-    ok "no percentage CSS widths (St ignores them; pixel set_size used instead)"
+    ok "no percentage CSS lengths (St ignores them; pixel set_size used instead)"
 fi
 
 # 7h. Fetch errors must be surfaced on the card. A rejected provider fetch

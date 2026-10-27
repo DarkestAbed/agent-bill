@@ -1,6 +1,6 @@
 {
   "name": "agent-bill-desklet",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "description": "A big dark-mode Linux Cinnamon desklet showing Claude Code, Codex (OpenAI) and Ollama cloud usage per 5-hour window and weekly allowance.",
   "scripts": {

@@ -124,12 +124,12 @@ else
     ok "no bare remove_child() in installed files"
 fi
 
-# 6d. no percentage CSS widths in installed files (St ignores % lengths —
+# 6d. no percentage CSS lengths in installed files (St ignores % lengths —
 # the bar would render wrong; use fixed pixel set_size instead).
-if grep -rInE 'width:\s*[0-9.]+%' "$INSTALLED" 2>/dev/null | grep -vE ':\s*//' | grep -qE 'width:\s*[0-9.]+%'; then
-    bad "percentage CSS width in installed files (St ignores % lengths)!"
+if grep -rInE '(width|height|radius|padding|margin|spacing|size):\s*[0-9.]+%' "$INSTALLED" 2>/dev/null | grep -vE ':\s*//' | grep -qE '(width|height|radius|padding|margin|spacing|size):\s*[0-9.]+%'; then
+    bad "percentage CSS length in installed files (St ignores % lengths)!"
 else
-    ok "no percentage CSS widths in installed files"
+    ok "no percentage CSS lengths in installed files"
 fi
 
 # 7. optional Cinnamon reload

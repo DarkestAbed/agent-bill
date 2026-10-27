@@ -1,26 +1,24 @@
 // agent-bill — Cinnamon desklet.
 // A dark-mode, one-stop usage dashboard for Claude (Anthropic), Codex
-// (OpenAI) and Ollama (cloud). Refreshes on a configurable interval, reads
-// credentials from the GNOME keyring, never blocks the UI (async libsoup3).
+// (OpenAI) and Ollama (cloud): one hero column per provider showing the
+// plan meter closest to its limit, with live reset countdowns. Refreshes on
+// a configurable interval and never blocks the UI (async libsoup3).
 //
-// Credential model (verified 2026-10-26 — see memory/provider-data-reality.md):
-//   - Claude: an Anthropic ORG ADMIN key (sk-ant-admin01-…) reads the Admin
-//     usage report; a Claude PLAN OAuth access token (pasted by the user)
-//     reads the plan 5h/7d utilization meters. The two are discriminated by
-//     key prefix in providers/claude.js.
-//   - Codex: an OpenAI ORG ADMIN key reads the Admin usage API; a ChatGPT
-//     PLAN OAuth access token (pasted by the user) reads the plan 5h/7d
-//     utilization meters. Discriminated by key prefix in providers/codex.js.
-//   - Ollama: a cloud API key (Bearer) reads /api/usage + /api/balance.
-// The desklet NEVER reads the CLIs' own credential files — tokens are entered
-// by the user into the desklet's own keyring entry.
+// Credential model (see _resolveCredential):
+//   - Claude / Codex: an ORG ADMIN key in the keyring (optional) reads the
+//     Admin usage APIs. Without one, the desklet reads the plan login the
+//     `claude` / `codex` CLI keeps in $HOME (lib/localauth.js) on every
+//     refresh, so the CLI's own token renewals are picked up automatically —
+//     nothing to paste, nothing that silently expires in the keyring.
+//   - Ollama: a cloud API key (Bearer, keyring) reads /api/usage + /api/balance.
 //
 // Resizing: Cinnamon desklets have no drag-resize; the user sets a pixel
 // width in settings (stock photoframe@cinnamon.org pattern) and we apply it
-// to the root actor with set_size(). Default 420px ("thicker" cards).
+// with set_size(), split evenly between the provider columns.
 
 const Desklet = imports.ui.desklet;
 const St = imports.gi.St;
+const Clutter = imports.gi.Clutter;
 const Mainloop = imports.mainloop;
 const Settings = imports.ui.settings;
 
@@ -33,26 +31,39 @@ const Ui = require('./lib/ui.js');
 const Keyring = require('./lib/keyring.js');
 const Usage = require('./lib/usage.js');
 const KeyDialog = require('./lib/keydialog.js');
+const LocalAuth = require('./lib/localauth.js');
 const ClaudeProvider = require('./providers/claude.js').Provider;
 const CodexProvider = require('./providers/codex.js').Provider;
 const OllamaProvider = require('./providers/ollama.js').Provider;
 
 const UUID = 'agent-bill@DarkestAbed';
 
-const RANGE_LABELS = { '5h': '5h', '24h': '24h', '7d': '7d' };
+// Plan meters are range-independent; the volume figures (admin tokens, Ollama
+// requests) always cover the last 24 hours.
+const RANGE = '24h';
+
+// Only org admin keys are kept in the keyring for Claude/Codex; plan logins
+// come from $HOME. Anything else stored there (e.g. a plan token pasted by an
+// older version) is ignored.
+const ADMIN_KEY_PREFIX = { claude: 'sk-ant-admin01-', codex: 'sk-' };
+
+// Countdowns repaint locally between fetches.
+const TICK_SECONDS = 30;
+
+const ROOT_PADDING = 18;
+const COLUMN_SPACING = 12;
 
 // Desklet-level dark theme (dark-mode only by design).
 const DESKLET_CSS = `
     background-color: #1e1e2e;
     border-radius: 16px;
     border: 1px solid #3b3b52;
-    padding: 16px;
+    padding: ${ROOT_PADDING}px;
+    spacing: 14px;
     color: #e6e6ef;
 `;
 
-// Default desklet width in pixels. Applied to the root actor via set_size so
-// the cards get a thicker, roomier layout than the old natural-width squeeze.
-const DEFAULT_WIDTH = 420;
+const DEFAULT_WIDTH = 600;
 
 class AgentBillDesklet extends Desklet.Desklet {
     constructor(metadata, deskletId) {
@@ -60,9 +71,9 @@ class AgentBillDesklet extends Desklet.Desklet {
         this.setHeader('Agent Bill');
 
         this._providers = [ClaudeProvider, CodexProvider, OllamaProvider];
-        this._cards = new Map();       // providerId -> card widget
-        this._snapshots = new Map();   // providerId -> last UsageSnapshot
+        this._cards = new Map();       // providerId -> column widget
         this._timeoutId = null;
+        this._tickId = null;
         this._refreshing = false;
         // Set when the desklet is removed/reloaded. Every async callback
         // (HTTP promise, keyring promise, timer) MUST check this before
@@ -75,9 +86,9 @@ class AgentBillDesklet extends Desklet.Desklet {
         this.settings.bindProperty(Settings.BindingDirection.IN,
             'refresh-interval', 'refreshInterval', this._onSettingsChanged.bind(this));
         this.settings.bindProperty(Settings.BindingDirection.IN,
-            'time-range', 'timeRange', this._onSettingsChanged.bind(this));
-        this.settings.bindProperty(Settings.BindingDirection.IN,
             'desklet-width', 'deskletWidth', this._onWidthChanged.bind(this));
+        this.settings.bindProperty(Settings.BindingDirection.IN,
+            'layout', 'layout', this._onWidthChanged.bind(this));
         this.settings.bindProperty(Settings.BindingDirection.IN,
             'claude-enabled', 'claudeEnabled', this._onSettingsChanged.bind(this));
         this.settings.bindProperty(Settings.BindingDirection.IN,
@@ -87,8 +98,8 @@ class AgentBillDesklet extends Desklet.Desklet {
 
         // Defaults if schema not yet bound.
         if (!this.refreshInterval) this.refreshInterval = 5;
-        if (!this.timeRange) this.timeRange = '24h';
         if (!this.deskletWidth) this.deskletWidth = DEFAULT_WIDTH;
+        if (!this.layout) this.layout = 'horizontal';
 
         this._buildLayout();
         this._applyWidth();
@@ -96,45 +107,32 @@ class AgentBillDesklet extends Desklet.Desklet {
 
     // ---------------- UI ----------------
     _buildLayout() {
-        const root = new St.BoxLayout({
-            vertical: true,
-            style: DESKLET_CSS,
-            x_expand: true,
-        });
+        const root = new St.BoxLayout({ vertical: true, style: DESKLET_CSS });
         this._root = root;
 
-        // Header row: live dot + title + refresh button + range
-        this._liveDot = new St.Bin({
-            style: 'background-color: #9a9ab0; border-radius: 50%; width: 10px; height: 10px;',
-        });
-        const title = Ui.makeLabel('Agent Bill', { size: 18, bold: true });
-        this._refreshButton = Ui.makeButton('↻ Refresh', { bg: '#2a2a3c' });
+        // Header: title · spacer · last update · refresh
+        const header = new St.BoxLayout({ style: 'spacing: 10px;' });
+        header.add_child(Ui.makeLabel('Agent Bill', { size: 15, bold: true }));
+        header.add_child(new St.Bin({ x_expand: true }));
+        this._updatedLabel = Ui.makeLabel('', { size: 11, color: Ui.COLORS.textFaint });
+        this._updatedLabel.y_align = Clutter.ActorAlign.CENTER;
+        header.add_child(this._updatedLabel);
+        this._refreshButton = Ui.makeButton('↻');
         this._refreshButton.connect('clicked', () => {
             if (this._destroyed)
                 return;
             this._scheduleRefresh(0);
         });
-        const spacer = new St.Bin({ x_expand: true });
-        this._rangeLabel = Ui.makeLabel(RANGE_LABELS[this.timeRange] || this.timeRange,
-            { size: 12, dim: true });
-        const header = new St.BoxLayout({ style: 'spacing: 10px;', x_expand: true });
-        header.add_child(this._liveDot);
-        header.add_child(title);
-        header.add_child(spacer);
         header.add_child(this._refreshButton);
-        header.add_child(this._rangeLabel);
         root.add_child(header);
 
-        // Sub-header: next refresh countdown
-        this._nextLabel = Ui.makeLabel('', { size: 11, dim: true });
-        root.add_child(this._nextLabel);
-
-        // Cards container
-        this._cardsBox = new St.BoxLayout({ vertical: true, style: 'spacing: 12px;', x_expand: true });
+        // Provider columns, side by side.
+        this._cardsBox = new St.BoxLayout({ style: `spacing: ${COLUMN_SPACING}px;` });
         root.add_child(this._cardsBox);
 
-        // Footer
-        this._footerLabel = Ui.makeLabel('', { size: 11, dim: true });
+        // Footer: transient messages only (key saved, …). Hidden when empty.
+        this._footerLabel = Ui.makeLabel('', { size: 11, color: Ui.COLORS.textDim, wrap: true });
+        this._footerLabel.hide();
         root.add_child(this._footerLabel);
 
         for (const provider of this._enabledProviders())
@@ -144,14 +142,20 @@ class AgentBillDesklet extends Desklet.Desklet {
     }
 
     // Cinnamon desklets have no drag-resize; the user sets a pixel width in
-    // settings and we apply it to the content root actor (the canonical
-    // photoframe@cinnamon.org pattern: content actor .set_size(width, height)).
-    // The desklet's natural width then follows the content root.
+    // settings and we apply it to the content root actor (photoframe@cinnamon.org
+    // pattern). Side by side, the width is split evenly between the columns in
+    // pixels; stacked, every card gets the full width.
     _applyWidth() {
         if (this._destroyed || !this._root)
             return;
-        const w = Math.max(200, Math.min(2000, Number(this.deskletWidth) || DEFAULT_WIDTH));
+        const stacked = this.layout === 'vertical';
+        this._cardsBox.vertical = stacked;
+        const w = Math.max(240, Math.min(2000, Number(this.deskletWidth) || DEFAULT_WIDTH));
         this._root.set_size(w, -1);
+        const n = stacked ? 1 : Math.max(1, this._cards.size);
+        const colW = Math.floor((w - 2 * ROOT_PADDING - 2 - COLUMN_SPACING * (n - 1)) / n);
+        for (const card of this._cards.values())
+            card.setWidth(colW);
     }
 
     _onWidthChanged() {
@@ -159,9 +163,7 @@ class AgentBillDesklet extends Desklet.Desklet {
     }
 
     _addCard(provider) {
-        const card = Ui.makeProviderCard(provider.id, provider.label);
-        card.setStatus('off');
-        card.renderError('waiting for first refresh…');
+        const card = Ui.makeProviderColumn(provider.id, provider.label);
         this._cards.set(provider.id, card);
         this._cardsBox.add_child(card.actor);
     }
@@ -175,31 +177,32 @@ class AgentBillDesklet extends Desklet.Desklet {
         });
     }
 
-    _providerEnabled(id) {
-        if (id === 'claude') return this.claudeEnabled !== false;
-        if (id === 'codex')  return this.codexEnabled !== false;
-        if (id === 'ollama') return this.ollamaEnabled !== false;
-        return true;
+    _setFooter(text) {
+        this._footerLabel.set_text(text);
+        if (text)
+            this._footerLabel.show();
+        else
+            this._footerLabel.hide();
     }
 
-    // ---------------- settings callbacks (the "Enter API key" buttons) ----
+    // ---------------- settings callbacks (the key buttons) ----------------
     onClaudeSetKey() {
         KeyDialog.showKeyDialog({
-            title: 'Enter Claude credential',
-            description: 'Paste EITHER an Anthropic organization admin API key (sk-ant-admin01-…) ' +
-                         'OR your Claude plan OAuth access token (from ~/.claude/.credentials.json, ' +
-                         'claudeAiOauth.accessToken — the same login the claude CLI uses). ' +
-                         'It is stored encrypted in the GNOME keyring and never written to disk in plaintext.',
+            title: 'Claude organization admin key (optional)',
+            description: 'Claude Pro/Max needs nothing here: the desklet reads your `claude` login ' +
+                         'from ~/.claude automatically. Paste an Anthropic organization admin key ' +
+                         '(sk-ant-admin01-…) only to show org-wide token reports instead. ' +
+                         'It is stored encrypted in the GNOME keyring.',
             onSubmit: (key) => this._storeKey(ClaudeProvider, key),
         });
     }
     onCodexSetKey() {
         KeyDialog.showKeyDialog({
-            title: 'Enter Codex credential',
-            description: 'Paste EITHER an OpenAI organization admin API key (sk-…) ' +
-                         'OR your ChatGPT plan OAuth access token (from ~/.codex/auth.json, ' +
-                         'tokens.access_token — the same login the codex CLI uses for "Sign in with ChatGPT"). ' +
-                         'It is stored encrypted in the GNOME keyring and never written to disk in plaintext.',
+            title: 'OpenAI organization admin key (optional)',
+            description: 'ChatGPT plans need nothing here: the desklet reads your `codex` login ' +
+                         'from ~/.codex automatically. Paste an OpenAI organization admin key ' +
+                         '(sk-admin-…) only to show org-wide token reports instead. ' +
+                         'It is stored encrypted in the GNOME keyring.',
             onSubmit: (key) => this._storeKey(CodexProvider, key),
         });
     }
@@ -212,11 +215,16 @@ class AgentBillDesklet extends Desklet.Desklet {
     }
 
     _storeKey(provider, key) {
+        const prefix = ADMIN_KEY_PREFIX[provider.id];
+        if (prefix && !key.startsWith(prefix)) {
+            this._setFooter(`Not saved: a ${provider.label} admin key starts with ${prefix} — plan logins are read from $HOME automatically.`);
+            return;
+        }
         Keyring.storeKey(provider.id, key).then((ok) => {
             if (this._destroyed) return; // dialog outlived the desklet
-            this._footerLabel.set_text(ok
-                ? `${provider.label} credential saved to keyring.`
-                : `Failed to save ${provider.label} credential.`);
+            this._setFooter(ok
+                ? `${provider.label} key saved to keyring.`
+                : `Failed to save ${provider.label} key.`);
             this._scheduleRefresh(0); // refresh immediately
         });
     }
@@ -228,33 +236,34 @@ class AgentBillDesklet extends Desklet.Desklet {
     _clearKey(provider) {
         Keyring.clearKey(provider.id).then((ok) => {
             if (this._destroyed) return;
-            this._footerLabel.set_text(ok
-                ? `${provider.label} credential removed.`
-                : `Failed to remove ${provider.label} credential.`);
+            this._setFooter(ok
+                ? `${provider.label} key removed.`
+                : `Failed to remove ${provider.label} key.`);
+            this._scheduleRefresh(0);
         });
     }
 
     // ---------------- refresh loop ----------------
     _onSettingsChanged() {
-        this._rangeLabel.set_text(RANGE_LABELS[this.timeRange] || this.timeRange);
-        // Rebuild cards for newly enabled/disabled providers.
+        // Rebuild columns for newly enabled/disabled providers.
         this._reconcileCards();
+        this._applyWidth();
         this._scheduleRefresh(0);
     }
 
     _reconcileCards() {
         const enabled = new Set(this._enabledProviders().map((p) => p.id));
-        // Remove cards for disabled providers. card.destroy() removes the
-        // actor from its parent AND destroys it — remove_child() alone would
-        // leave a parentless-but-alive actor that GJS later disposes, and
-        // Clutter 6 aborts if disposal happens while still parented.
+        // card.destroy() removes the actor from its parent AND destroys it —
+        // remove_child() alone would leave a parentless-but-alive actor that
+        // GJS later disposes, and Clutter 6 aborts if that happens while
+        // still parented.
         for (const [id, card] of this._cards) {
             if (!enabled.has(id)) {
                 card.destroy();
                 this._cards.delete(id);
             }
         }
-        // Add cards for newly enabled providers.
+        // Re-add in provider order so columns keep a stable left-to-right order.
         for (const provider of this._enabledProviders()) {
             if (!this._cards.has(provider.id))
                 this._addCard(provider);
@@ -284,19 +293,36 @@ class AgentBillDesklet extends Desklet.Desklet {
         }
     }
 
+    _startTick() {
+        if (this._tickId)
+            return;
+        this._tickId = Mainloop.timeout_add_seconds(TICK_SECONDS, () => {
+            if (this._destroyed) {
+                this._tickId = null;
+                return false;
+            }
+            const now = Date.now();
+            for (const card of this._cards.values())
+                card.tick(now);
+            return true;
+        });
+    }
+
+    _stopTick() {
+        if (this._tickId) {
+            Mainloop.source_remove(this._tickId);
+            this._tickId = null;
+        }
+    }
+
     _refresh() {
         if (this._destroyed || this._refreshing)
             return; // don't overlap fetches; bail if desklet is gone
         this._refreshing = true;
-        this._liveDot.style = 'background-color: #f9e2af; border-radius: 50%; width: 10px; height: 10px;'; // amber = working
-        if (this._refreshButton)
-            this._refreshButton.set_label('↻ …');
+        this._refreshButton.set_label('…');
 
-        const range = this.timeRange || '24h';
-        const providers = this._enabledProviders();
-
-        const tasks = providers.map((provider) =>
-            this._fetchOne(provider, range)
+        const tasks = this._enabledProviders().map((provider) =>
+            this._fetchOne(provider)
                 .then((snapshot) => ({ provider, snapshot, ok: true }))
                 .catch((err) => ({ provider, err, ok: false }))
         );
@@ -310,47 +336,49 @@ class AgentBillDesklet extends Desklet.Desklet {
                 return;
             }
             for (const result of results) {
-                const { provider } = result;
-                const card = this._cards.get(provider.id);
+                const card = this._cards.get(result.provider.id);
                 if (!card)
                     continue;
                 if (result.ok) {
-                    const snapshot = result.snapshot;
-                    this._snapshots.set(provider.id, snapshot);
-                    card.render(snapshot, RANGE_LABELS[range] || range);
-                    const bp = this._barParams(provider.id, snapshot, range);
-                    if (bp.percent === null) {
-                        card.hideBar();
-                    } else {
-                        card.showBar();
-                        card.renderBar(bp.percent, card.barWidth(), bp.title);
-                    }
-                    card.setStatus('ok');
+                    card.render(result.snapshot);
                 } else {
-                    // SURFACE the error on the card — a rejected fetch must
-                    // never leave the card stuck on "waiting for first
-                    // refresh…" (that is what hid the Anthropic 403).
-                    card.renderError(this._errorText(provider.id, result.err));
+                    // SURFACE the error on the card (keeping the last good
+                    // data, marked stale) — never leave a card silently stuck.
+                    card.renderError(this._errorText(result.provider.id, result.err));
                 }
             }
             this._refreshing = false;
-            this._liveDot.style = 'background-color: #a6e3a1; border-radius: 50%; width: 10px; height: 10px;'; // green = done
-            if (this._refreshButton)
-                this._refreshButton.set_label('↻ Refresh');
-            this._footerLabel.set_text(`last refresh ${new Date().toLocaleTimeString('en-US')}`);
+            this._refreshButton.set_label('↻');
+            this._updatedLabel.set_text(`updated ${Ui.formatClock(new Date())}`);
             this._scheduleRefresh(); // next tick
         });
     }
 
-    _fetchOne(provider, range) {
+    // Resolve the credential for one provider, fresh on every refresh.
+    // Throws (with an actionable message) when none is available.
+    _resolveCredential(provider) {
         const key = Keyring.lookupKey(provider.id);
-        if (!key)
-            return Promise.reject(new Error('no credential — open settings to add one'));
-        return provider.fetchUsage(range, key)
-            .then((raw) => Usage.buildSnapshot(provider.id, range,
-                provider.id === 'claude' ? raw : null,
-                provider.id === 'codex' ? raw : null,
-                provider.id === 'ollama' ? raw : null));
+        if (provider.id === 'ollama') {
+            if (!key)
+                throw new Error('no Ollama API key — add one in settings');
+            return { kind: 'key', key };
+        }
+        if (key && key.startsWith(ADMIN_KEY_PREFIX[provider.id]))
+            return { kind: 'admin', key };
+        const login = provider.id === 'claude' ? LocalAuth.readClaude() : LocalAuth.readCodex();
+        return Object.assign({ kind: 'plan' }, login);
+    }
+
+    _fetchOne(provider) {
+        let cred;
+        try {
+            cred = this._resolveCredential(provider);
+        } catch (e) {
+            return Promise.reject(e);
+        }
+        const badge = cred.subscriptionType || cred.planType || null;
+        return provider.fetchUsage(RANGE, cred)
+            .then((raw) => Usage.buildSnapshot(provider.id, raw, { badge }));
     }
 
     // Human-readable, actionable error text per provider.
@@ -358,10 +386,10 @@ class AgentBillDesklet extends Desklet.Desklet {
         const status = err && err.status;
         if (status === 401 || status === 403) {
             if (providerId === 'claude')
-                return 'credential rejected (403/401) — your Claude plan OAuth token was revoked or expired. Re-paste a fresh token: claudeAiOauth.accessToken from ~/.claude/.credentials.json (run `claude` once to refresh the login), or use an org admin key (sk-ant-admin01-…).';
+                return 'login rejected — run `claude` once to renew it';
             if (providerId === 'codex')
-                return 'credential rejected (403/401) — paste your ChatGPT plan access token, or an OpenAI org admin key';
-            return 'API key rejected (401/403)';
+                return 'login rejected — run `codex login`';
+            return 'API key rejected — check it in settings';
         }
         if (status === 429)
             return `rate limited — retry in ${err.retryAfterSeconds || 60}s`;
@@ -370,35 +398,10 @@ class AgentBillDesklet extends Desklet.Desklet {
         return 'fetch failed';
     }
 
-    // The plan-meter bar parameters for a card. Returns { percent, title }.
-    //   - Claude/Codex PLAN token: 5-hour window % (the plan's real meter);
-    //     weekly % is shown on the card's Weekly line.
-    //   - Ollama: the plan's REAL usage meter — monthly allowance % when
-    //     /api/balance reports dollars, otherwise the session request-quota
-    //     % (100 - remaining_percent). Never fabricated.
-    //   - Claude/Codex ADMIN key (raw tokens): no plan meter exists → 0 and a
-    //     neutral title.
-    //   - When a plan meter is unavailable but the plan reports honest data
-    //     (e.g. requests), hide the misleading 0% bar — show the data instead.
-    _barParams(providerId, snapshot, range) {
-        if (providerId === 'ollama') {
-            if (snapshot.plan && snapshot.plan.allowancePct !== null && snapshot.plan.allowancePct !== undefined)
-                return { percent: snapshot.plan.allowancePct, title: 'monthly allowance' };
-            if (snapshot.plan && snapshot.plan.windowPct !== null && snapshot.plan.windowPct !== undefined)
-                return { percent: snapshot.plan.windowPct, title: 'session quota' };
-            // No quota reported: the honest data is the Reqs stat + Weekly line.
-            return { percent: null, title: null };
-        }
-        // Token plans (Claude/Codex OAuth): 5h window %.
-        if (snapshot.plan && snapshot.plan.windowPct !== null && snapshot.plan.windowPct !== undefined)
-            return { percent: snapshot.plan.windowPct, title: '5-hour window' };
-        // Admin-key token providers: tokens shown, no plan meter.
-        return { percent: null, title: null };
-    }
-
     // ---------------- lifecycle ----------------
     on_desklet_added_to_desktop() {
         this._scheduleRefresh(1); // first fetch shortly after placement
+        this._startTick();
     }
 
     on_desklet_removed() {
@@ -406,6 +409,7 @@ class AgentBillDesklet extends Desklet.Desklet {
         // on, NO async callback may touch any actor — set the flag first.
         this._destroyed = true;
         this._stopTimer();
+        this._stopTick();
         if (this.settings) {
             this.settings.finalize();
             this.settings = null;
@@ -413,11 +417,11 @@ class AgentBillDesklet extends Desklet.Desklet {
     }
 
     on_desklet_reloaded() {
-        // Desklet is being reloaded; timers/settings are torn down by Cinnamon.
         // Same guard as removal: in-flight HTTP/keyring callbacks must not
         // touch the (soon-to-be-destroyed) actors.
         this._destroyed = true;
         this._stopTimer();
+        this._stopTick();
     }
 }
 

@@ -8,13 +8,16 @@
 //     label: 'Claude' | 'Codex' | 'Ollama',   // string, card title
 //
 //     // range: '5h' | '24h' | '7d'   (UI-selected look-back window)
-//     // key:   the provider API key, already retrieved from the keyring.
+//     // cred:  the resolved credential (desklet.js _resolveCredential):
+//     //          { kind: 'admin', key }           org admin key (keyring)
+//     //          { kind: 'plan', token, … }       CLI login read from $HOME
+//     //          { kind: 'key', key }             plain API key (Ollama)
 //     // Returns a Promise that resolves to the RAW parsed JSON payload
 //     // from the provider's usage endpoint (the desklet never interprets
 //     // this directly — lib/usage.js normalizes it into a UsageSnapshot).
 //     // On failure the Promise must reject with an Error (optionally with
 //     // .status = HTTP status and .retryAfterSeconds for 429s).
-//     fetchUsage(range, key) { ... },
+//     fetchUsage(range, cred) { ... },
 //   };
 //
 // Keeping this contract identical across providers lets the desklet poll

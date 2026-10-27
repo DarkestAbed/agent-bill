@@ -22,15 +22,13 @@
 // The desklet shows whichever real meter the plan reports; it never invents
 // a usage %.
 //
-// To always populate the weekly line (Ollama has no 5h range) and to surface
-// the real allowance %, this provider merges three calls into
-// { range, weekly, balance }. 10 req/min shared rate limit; refresh is every
-// 5 min, so 2–3 calls per cycle is well within budget.
+// The card needs the hourly request trend (range=24h) and the real quota
+// meters (/api/balance); the provider merges both into { usage, balance }.
+// 10 req/min shared rate limit; 2 calls per refresh is well within budget.
 
 // Cinnamon's require() resolves relative to the desklet ROOT (not this file),
 // so paths look like they're from desklet.js even though we're in providers/.
 const HttpLib = require('./lib/http.js');
-const Usage = require('./lib/usage.js');
 
 const API_BASE = 'https://ollama.com';
 
@@ -38,49 +36,27 @@ const Provider = {
     id: 'ollama',
     label: 'Ollama',
 
-    fetchUsage(range, key) {
-        if (!key)
-            return Promise.reject(new Error('No Ollama API key configured.'));
+    // cred: { kind: 'key', key }. The card always shows the last 24 h, so
+    // @range is not used.
+    fetchUsage(range, cred) {
+        const headers = { 'Authorization': `Bearer ${cred.key}` };
 
-        const headers = { 'Authorization': `Bearer ${key}` };
-        const ollamaRange = Usage.ollamaRange(range);
-
-        // Main range payload.
-        const rangePromise = HttpLib.getJsonWithQuery(
+        const usagePromise = HttpLib.getJsonWithQuery(
             `${API_BASE}/api/usage`,
-            { range: ollamaRange, scope: 'self' },
+            { range: '24h', scope: 'self' },
             headers
         );
 
-        // Weekly payload: always 7d unless the requested range already is 7d
-        // (then the same payload serves as weekly — no duplicate call).
-        const weeklyPromise = (ollamaRange === '7d')
-            ? rangePromise
-            : HttpLib.getJsonWithQuery(
-                `${API_BASE}/api/usage`,
-                { range: '7d', scope: 'self' },
-                headers
-            );
-
-        // Balance: two verified shapes. Paid plans return dollars
-        // ({ included: { balance_usd, allowance_usd, period } }); legacy/free
-        // tiers return request-quota meters ({ included: { session: {
-        // remaining_percent, resets_at }, weekly: { … } } }) — both are real
-        // usage meters. Unauthorized keys may still get 401/404 — tolerate
-        // that (the card then honestly says no allowance was reported).
+        // Balance: two verified shapes (see header). Keys without access may
+        // get 401/404 — tolerate that; the card then shows requests only.
         const balancePromise = HttpLib.getJson(`${API_BASE}/api/balance`, headers)
-            .then((b) => b)
             .catch((err) => {
                 if (err && (err.status === 401 || err.status === 404))
                     return null;
                 throw err;
             });
 
-        return Promise.all([rangePromise, weeklyPromise, balancePromise])
-            .then(([rangeData, weeklyData, balance]) => ({
-                range: rangeData,
-                weekly: weeklyData,
-                balance,
-            }));
+        return Promise.all([usagePromise, balancePromise])
+            .then(([usage, balance]) => ({ usage, balance }));
     },
 };

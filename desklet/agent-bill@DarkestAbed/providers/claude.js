@@ -1,18 +1,15 @@
 // agent-bill — Claude (Anthropic) provider.
 //
-// Two credential kinds, discriminated by key prefix:
+// Two credential kinds (resolved by desklet.js _resolveCredential):
 //   - Anthropic ORGANIZATION ADMIN key (sk-ant-admin01-…): Admin API
 //     GET /v1/organizations/usage_report/messages — raw token buckets.
 //     Requires an Anthropic organization; a Claude Plan (Pro/Max) login is an
 //     individual account and gets HTTP 403 here (verified 2026-10-26).
-//   - Claude PLAN OAuth access token (claudeAiOauth.accessToken from
-//     ~/.claude/.credentials.json, pasted by the user into the desklet's own
-//     keyring entry): the undocumented plan-usage endpoint
+//   - Claude PLAN login (Pro/Max): the OAuth access token the `claude` CLI
+//     keeps in ~/.claude/.credentials.json, re-read on every refresh by
+//     lib/localauth.js: the undocumented plan-usage endpoint
 //     GET /api/oauth/usage — 5-hour / 7-day utilization meters. This is what
 //     `claude /usage` uses for plan subscribers.
-//
-// The token is desklet-owned (user-pasted); the desklet never reads the CLI's
-// credential file itself.
 
 // Cinnamon's require() resolves relative to the desklet ROOT (not this file),
 // so paths look like they're from desklet.js even though we're in providers/.
@@ -30,12 +27,11 @@ const Provider = {
     id: 'claude',
     label: 'Claude',
 
-    fetchUsage(range, key) {
-        if (!key)
-            return Promise.reject(new Error('No Claude credential configured.'));
-        if (key.startsWith('sk-ant-admin01-'))
-            return _fetchAdmin(range, key);
-        return _fetchPlanUsage(key);
+    // cred: { kind: 'admin', key } | { kind: 'plan', token }
+    fetchUsage(range, cred) {
+        if (cred.kind === 'admin')
+            return _fetchAdmin(range, cred.key);
+        return _fetchPlanUsage(cred.token);
     },
 };
 
