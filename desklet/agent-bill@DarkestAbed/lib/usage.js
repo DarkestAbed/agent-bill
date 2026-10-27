@@ -98,9 +98,12 @@ function _numOrNull(x) {
 // ---------------- Anthropic ----------------
 // Two shapes reach this function:
 //   1. Admin API usage_report/messages (org admin key): { data: [buckets] }.
-//   2. OAuth plan usage (Claude Pro/Max login): utilization meters, either
-//      legacy { five_hour:{utilization,resets_at}, seven_day:{…} } or a
-//      modern { limits: [ {type, utilization, resets_at} ] } array.
+//   2. OAuth plan usage (Claude Pro/Max login): utilization meters. The VERIFIED
+//      live shape (2026-10-26) has BOTH `five_hour`/`seven_day` objects
+//      ({utilization, resets_at, …}) AND a `limits[]` array
+//      ({kind, group, percent, resets_at}). The legacy+modern fields are read
+//      first; limits[] is only a fallback — its entries use `percent` (0–100)
+//      and `kind` ("session"|"weekly_all"), NOT `utilization`/`type`.
 function _fillClaude(snap, range, data) {
     if (!data)
         return;
@@ -129,18 +132,12 @@ function _fillClaude(snap, range, data) {
 
 function _planFromClaudeOAuth(d) {
     const plan = { windowPct: null, windowResetAt: null, weeklyPct: null, weeklyResetAt: null, allowancePct: null, note: null };
+    // Preferred: the legacy field objects (verified live to carry the real
+    // utilization). `utilization` arrives as 0–100 here (e.g. 6.0, 14.0).
     let five = null, seven = null;
     if (d.five_hour || d.seven_day) {
         five = d.five_hour;
         seven = d.seven_day;
-    } else if (Array.isArray(d.limits)) {
-        for (const l of d.limits) {
-            const t = String(l.type || '').toLowerCase();
-            if (t.includes('five') || t.includes('session') || t.includes('5h'))
-                five = l;
-            else if (t.includes('seven') || t.includes('weekly'))
-                seven = l;
-        }
     }
     if (five) {
         plan.windowPct = _normPct(five.utilization);
@@ -149,6 +146,21 @@ function _planFromClaudeOAuth(d) {
     if (seven) {
         plan.weeklyPct = _normPct(seven.utilization);
         plan.weeklyResetAt = seven.resets_at || null;
+    }
+    // Fallback: the modern limits[] array (kind=session → 5h,
+    // kind=weekly_all → weekly; value field is `percent`, 0–100).
+    if ((plan.windowPct === null || plan.weeklyPct === null) && Array.isArray(d.limits)) {
+        for (const l of d.limits) {
+            const kind = String(l.kind || l.type || '').toLowerCase();
+            const pct = _numOrNull(l.percent !== undefined ? l.percent : l.utilization);
+            if (plan.windowPct === null && (kind === 'session' || kind.includes('five') || kind.includes('5h'))) {
+                plan.windowPct = pct;
+                plan.windowResetAt = l.resets_at || plan.windowResetAt;
+            } else if (plan.weeklyPct === null && (kind === 'weekly_all' || kind === 'weekly' || kind.includes('seven') || kind.includes('weekly'))) {
+                plan.weeklyPct = pct;
+                plan.weeklyResetAt = l.resets_at || plan.weeklyResetAt;
+            }
+        }
     }
     if (plan.windowPct === null && plan.weeklyPct === null)
         plan.note = 'plan usage not reported';

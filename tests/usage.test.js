@@ -57,11 +57,12 @@ const claudePlanLegacy = {
     seven_day: { utilization: 0.15, resets_at: '2026-11-02T00:00:00Z' },
     seven_day_sonnet: { utilization: 0.30, resets_at: '2026-11-02T00:00:00Z' },
 };
-// Claude PLAN OAuth /api/oauth/usage (modern limits[] shape).
+// Claude PLAN OAuth /api/oauth/usage (modern limits[] shape, VERIFIED field
+// names: kind=session/weekly_all, value=percent).
 const claudePlanModern = {
     limits: [
-        { type: 'five_hour', utilization: 42, resets_at: '2026-10-27T05:00:00Z' },
-        { type: 'seven_day', utilization: 15, resets_at: '2026-11-02T00:00:00Z' },
+        { kind: 'session', group: 'session', percent: 42, resets_at: '2026-10-27T05:00:00Z' },
+        { kind: 'weekly_all', group: 'weekly', percent: 15, resets_at: '2026-11-02T00:00:00Z' },
     ],
 };
 // Codex/ChatGPT plan wham/usage.
@@ -119,10 +120,43 @@ test('claude plan (legacy shape): 5h/weekly % normalized from 0–1 to 0–100, 
     assert.equal(snap.costUsd, null);
 });
 
-test('claude plan (modern limits[] shape): picks five_hour + seven_day by type', () => {
+test('claude plan (modern limits[] shape with VERIFIED field names): uses percent + kind', () => {
+    // Verified live 2026-10-26: limits[] entries are {kind, group, percent,
+    // resets_at} — kind is "session"/"weekly_all" and the value is `percent`.
     const snap = Usage.buildSnapshot('claude', '24h', claudePlanModern, null, null);
-    assert.equal(snap.plan.windowPct, 42);   // already 0–100
-    assert.equal(snap.plan.weeklyPct, 15);
+    assert.equal(snap.plan.windowPct, 42);   // kind=session -> 5h
+    assert.equal(snap.plan.weeklyPct, 15);   // kind=weekly_all -> weekly
+});
+
+test('claude plan (VERIFIED live shape 2026-10-26): five_hour/seven_day take priority over limits[]', () => {
+    // The real payload carries BOTH five_hour/seven_day (utilization 0–100)
+    // AND limits[] (percent). The field objects are authoritative.
+    const live = {
+        five_hour: { utilization: 6.0, resets_at: '2026-10-27T04:50:00Z' },
+        seven_day: { utilization: 14.0, resets_at: '2026-10-31T03:00:00Z' },
+        limits: [
+            { kind: 'session', group: 'session', percent: 6, resets_at: '2026-10-27T04:50:00Z' },
+            { kind: 'weekly_all', group: 'weekly', percent: 14, resets_at: '2026-10-31T03:00:00Z' },
+        ],
+        extra_usage: { is_enabled: false },
+    };
+    const snap = Usage.buildSnapshot('claude', '5h', live, null, null);
+    assert.equal(snap.plan.windowPct, 6);
+    assert.equal(snap.plan.weeklyPct, 14);
+    assert.equal(snap.plan.windowResetAt, '2026-10-27T04:50:00Z');
+    assert.equal(snap.plan.weeklyResetAt, '2026-10-31T03:00:00Z');
+    assert.equal(snap.tokensIn, null);
+});
+
+test('claude plan (limits[] only, no five_hour/seven_day): falls back to percent by kind', () => {
+    const snap = Usage.buildSnapshot('claude', '24h', {
+        limits: [
+            { kind: 'session', percent: 55, resets_at: 'r1' },
+            { kind: 'weekly_all', percent: 20, resets_at: 'r2' },
+        ],
+    }, null, null);
+    assert.equal(snap.plan.windowPct, 55);
+    assert.equal(snap.plan.weeklyPct, 20);
 });
 
 // ---------- Codex: Admin API (raw tokens) ----------
