@@ -21,7 +21,7 @@ Each provider accepts **two credential kinds**, picked automatically by key pref
 |---|---|---|
 | **Claude** | Admin API key `sk-ant-admin01-…` → `GET /v1/organizations/usage_report/messages` (raw tokens) | Claude **plan OAuth token** → `GET /api/oauth/usage` (**5h / 7d plan %** + reset times) |
 | **Codex** | OpenAI admin key `sk-…` → `GET /v1/organization/usage/completions` (raw tokens) | ChatGPT **plan OAuth token** → `GET chatgpt.com/backend-api/wham/usage` (**5h / 7d plan %**) |
-| **Ollama** | — | cloud API key (Bearer) → `GET https://ollama.com/api/usage` (+ `/api/balance`) |
+| **Ollama** | — | cloud API key (Bearer) → `GET https://ollama.com/api/usage` + `/api/balance` |
 
 Where to get the **plan tokens** (paste into the desklet's own key dialog — the desklet
 never reads the CLIs' credential files):
@@ -32,12 +32,24 @@ never reads the CLIs' credential files):
   `codex` CLI uses for "Sign in with ChatGPT").
 - **Ollama**: your ollama.com API key.
 
+**What the cards show per plan tier:**
+
+- **Claude/Codex plan**: the real **5-hour window %** on the bar and the real
+  **weekly % + reset time** on the Weekly line (from the plan utilization endpoints).
+  Tokens/cost show `n/a` because plan endpoints report meters, not raw tokens.
+- **Ollama paid plan**: monthly **allowance %** on the bar, plus tokens/requests/cost.
+- **Ollama legacy/free tier**: real **session quota %** on the bar and **weekly %** on
+  the Weekly line — computed as `100 − remaining_percent` from `/api/balance`
+  (`included.session` / `included.weekly`, verified live). Tokens/cost show `n/a`
+  with the note "tokens/cost not on your plan".
+
 > **Honesty rules:** a Claude Plan / ChatGPT Plan subscription is *not* readable through
 > the Anthropic/OpenAI Admin APIs (those need an organization admin key and return
 > HTTP 403 for plan users — verified). Plan usage therefore comes from the plan
 > utilization endpoints, which report **% meters**, not raw tokens. Ollama cloud on a
-> legacy plan reports **request counts only** (no tokens/cost) — the card says so
-> instead of inventing numbers. The desklet never fabricates a percentage.
+> legacy plan reports **request counts only** in `/api/usage` (no tokens/cost) — the
+> card says so instead of inventing numbers, and shows the real quota % from
+> `/api/balance`. The desklet never fabricates a percentage.
 
 ## Repository layout
 

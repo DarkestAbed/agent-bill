@@ -1,7 +1,7 @@
 // agent-bill — Ollama (cloud) provider.
 // Endpoints:
 //   GET https://ollama.com/api/usage    range=24h|7d|30d, scope=self
-//   GET https://ollama.com/api/balance  (allowance %, paid plans only)
+//   GET https://ollama.com/api/balance  (allowance meters)
 // Auth: Authorization: Bearer <ollama.com API key>
 //
 // VERIFIED live 2026-10-26: /api/usage returns
@@ -9,13 +9,23 @@
 //     totals: { request_count, [input_tokens, cached_input_tokens,
 //               output_tokens, usage_usd  — PAID plans only] },
 //     buckets: [ { from, until, request_count, … } ] }
-// On legacy plans totals carries ONLY request_count (no tokens/cost), and
-// /api/balance returns 401 — so the desklet must not invent a usage %.
+// On legacy plans totals carries ONLY request_count (no tokens/cost).
 //
-// To always populate the weekly line (Ollama has no 5h range) and to surface a
-// real allowance % when the plan exposes it, this provider merges three calls
-// into { range, weekly, balance }. 10 req/min shared rate limit; refresh is
-// every 5 min, so 2–3 calls per cycle is well within budget.
+// /api/balance has TWO verified shapes:
+//   - PAID plan: { included: { balance_usd, allowance_usd, period },
+//                  purchased: { balance_usd } }              -> dollar %
+//   - LEGACY/free tier (verified live: HTTP 200, NOT 401):
+//       { included: { session: { remaining_percent, resets_at },
+//                     weekly:  { remaining_percent, resets_at } },
+//         purchased: { balance_usd } }                      -> used % =
+//     100 - remaining_percent for the session (5h-style) and weekly windows.
+// The desklet shows whichever real meter the plan reports; it never invents
+// a usage %.
+//
+// To always populate the weekly line (Ollama has no 5h range) and to surface
+// the real allowance %, this provider merges three calls into
+// { range, weekly, balance }. 10 req/min shared rate limit; refresh is every
+// 5 min, so 2–3 calls per cycle is well within budget.
 
 // Cinnamon's require() resolves relative to the desklet ROOT (not this file),
 // so paths look like they're from desklet.js even though we're in providers/.
@@ -52,10 +62,12 @@ const Provider = {
                 headers
             );
 
-        // Allowance balance: paid plans return { included: { balance_usd,
-        // allowance_usd, period }, purchased: { balance_usd } }. Legacy plans /
-        // unauthorized keys return 401/404 — tolerate that (allowance % simply
-        // stays null and the card says so honestly).
+        // Balance: two verified shapes. Paid plans return dollars
+        // ({ included: { balance_usd, allowance_usd, period } }); legacy/free
+        // tiers return request-quota meters ({ included: { session: {
+        // remaining_percent, resets_at }, weekly: { … } } }) — both are real
+        // usage meters. Unauthorized keys may still get 401/404 — tolerate
+        // that (the card then honestly says no allowance was reported).
         const balancePromise = HttpLib.getJson(`${API_BASE}/api/balance`, headers)
             .then((b) => b)
             .catch((err) => {

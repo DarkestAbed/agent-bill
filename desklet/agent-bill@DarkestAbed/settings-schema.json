@@ -86,7 +86,7 @@
     "type": "checkbox",
     "default": true,
     "description": "Show Ollama cloud usage",
-    "tooltip": "Fetch usage from https://ollama.com/api/usage (requests; tokens/cost on paid plans) and /api/balance (allowance %)."
+    "tooltip": "Fetch usage from https://ollama.com/api/usage (requests; tokens/cost on paid plans) and /api/balance (dollar allowance on paid plans, session/weekly request-quota % on legacy tiers)."
   },
   "ollama-set-key": {
     "type": "button",

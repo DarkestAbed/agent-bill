@@ -319,7 +319,12 @@ class AgentBillDesklet extends Desklet.Desklet {
                     this._snapshots.set(provider.id, snapshot);
                     card.render(snapshot, RANGE_LABELS[range] || range);
                     const bp = this._barParams(provider.id, snapshot, range);
-                    card.renderBar(bp.percent, card.barWidth(), bp.title);
+                    if (bp.percent === null) {
+                        card.hideBar();
+                    } else {
+                        card.showBar();
+                        card.renderBar(bp.percent, card.barWidth(), bp.title);
+                    }
                     card.setStatus('ok');
                 } else {
                     // SURFACE the error on the card — a rejected fetch must
@@ -353,7 +358,7 @@ class AgentBillDesklet extends Desklet.Desklet {
         const status = err && err.status;
         if (status === 401 || status === 403) {
             if (providerId === 'claude')
-                return 'credential rejected (403/401) — a Claude PLAN login works here; an org admin key needs an Anthropic organization';
+                return 'credential rejected (403/401) — your Claude plan OAuth token was revoked or expired. Re-paste a fresh token: claudeAiOauth.accessToken from ~/.claude/.credentials.json (run `claude` once to refresh the login), or use an org admin key (sk-ant-admin01-…).';
             if (providerId === 'codex')
                 return 'credential rejected (403/401) — paste your ChatGPT plan access token, or an OpenAI org admin key';
             return 'API key rejected (401/403)';
@@ -367,23 +372,28 @@ class AgentBillDesklet extends Desklet.Desklet {
 
     // The plan-meter bar parameters for a card. Returns { percent, title }.
     //   - Claude/Codex PLAN token: 5-hour window % (the plan's real meter);
-    //     weekly % is shown on the card footer text.
+    //     weekly % is shown on the card's Weekly line.
+    //   - Ollama: the plan's REAL usage meter — monthly allowance % when
+    //     /api/balance reports dollars, otherwise the session request-quota
+    //     % (100 - remaining_percent). Never fabricated.
     //   - Claude/Codex ADMIN key (raw tokens): no plan meter exists → 0 and a
     //     neutral title.
-    //   - Ollama: monthly allowance % when /api/balance reports one,
-    //     otherwise 0 (the honest data is the Reqs stat + Weekly line; we
-    //     never fabricate a %).
+    //   - When a plan meter is unavailable but the plan reports honest data
+    //     (e.g. requests), hide the misleading 0% bar — show the data instead.
     _barParams(providerId, snapshot, range) {
         if (providerId === 'ollama') {
             if (snapshot.plan && snapshot.plan.allowancePct !== null && snapshot.plan.allowancePct !== undefined)
                 return { percent: snapshot.plan.allowancePct, title: 'monthly allowance' };
-            return { percent: 0, title: 'requests (no allowance reported)' };
+            if (snapshot.plan && snapshot.plan.windowPct !== null && snapshot.plan.windowPct !== undefined)
+                return { percent: snapshot.plan.windowPct, title: 'session quota' };
+            // No quota reported: the honest data is the Reqs stat + Weekly line.
+            return { percent: null, title: null };
         }
         // Token plans (Claude/Codex OAuth): 5h window %.
         if (snapshot.plan && snapshot.plan.windowPct !== null && snapshot.plan.windowPct !== undefined)
             return { percent: snapshot.plan.windowPct, title: '5-hour window' };
         // Admin-key token providers: tokens shown, no plan meter.
-        return { percent: 0, title: 'usage (no plan meter)' };
+        return { percent: null, title: null };
     }
 
     // ---------------- lifecycle ----------------

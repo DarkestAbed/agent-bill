@@ -54,6 +54,14 @@ function makeLabel(text, opts = {}) {
     });
     if (opts.ellipsize)
         label.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+    // Long text (card error footer) must WRAP, not clip: St.Label does not
+    // wrap by default and the card has a fixed pixel width.
+    if (opts.wrap) {
+        label.clutter_text.line_wrap = true;
+        label.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
+    }
+    if (opts.expand)
+        label.x_expand = true;
     return label;
 }
 
@@ -175,8 +183,9 @@ function makeProviderCard(providerId, providerLabel) {
     stats.add_child(statCost.actor);
     card.add_child(stats);
 
-    // Footer: last updated / error / plan note
-    const footer = makeLabel('', { size: 11, dim: true });
+    // Footer: last updated / error / plan note. Wraps so a long error
+    // message is fully readable instead of clipped at the card edge.
+    const footer = makeLabel('', { size: 11, dim: true, wrap: true, expand: true });
     card.add_child(footer);
 
     return {
@@ -201,15 +210,37 @@ function makeProviderCard(providerId, providerLabel) {
 
         render(snapshot, rangeLabel) {
             this.setStatus('ok');
+            // A failed fetch hides the bar; a successful render must re-show it
+            // before deciding whether to keep it hidden (no real meter).
+            this.showBar();
             const fmt = (n) => (n === null || n === undefined) ? 'n/a' : _formatTokens(n);
             this._statIn.valueLabel.set_text(fmt(snapshot.tokensIn));
             this._statOut.valueLabel.set_text(fmt(snapshot.tokensOut));
             this._statReq.valueLabel.set_text(snapshot.requests === null ? '—' : _formatNumber(snapshot.requests));
             this._statCost.valueLabel.set_text(snapshot.costUsd === null ? '—' : `$${snapshot.costUsd.toFixed(2)}`);
 
-            // Weekly line: always populated for Ollama (separate 7d fetch);
-            // for token providers only when the selected range is 7d.
-            if (snapshot.weekly) {
+            // Weekly line: plan cards always have the plan's real weekly %
+            // (Claude/Codex 7-day utilization, Ollama weekly quota), independent
+            // of the selected range — show it with its reset time. Token-based
+            // cards additionally show the 7d window totals when the range is
+            // 7d (Ollama always has a separate 7d fetch).
+            const plan = snapshot.plan;
+            const hasPlanWeekly = plan && plan.weeklyPct !== null && plan.weeklyPct !== undefined;
+            if (hasPlanWeekly) {
+                let w = `weekly ${Math.round(plan.weeklyPct)}%`;
+                if (plan.weeklyResetAt)
+                    w += ` · resets ${_formatReset(plan.weeklyResetAt)}`;
+                if (snapshot.weekly) {
+                    const parts = [];
+                    if (snapshot.weekly.tokensIn)
+                        parts.push(`${_formatTokens(snapshot.weekly.tokensIn)} in / ${_formatTokens(snapshot.weekly.tokensOut)} out`);
+                    if (snapshot.weekly.requests !== null && snapshot.weekly.requests !== undefined)
+                        parts.push(`${_formatNumber(snapshot.weekly.requests)} reqs`);
+                    if (parts.length)
+                        w += ` · ${parts.join(' · ')}`;
+                }
+                this._weekly.valueLabel.set_text(w);
+            } else if (snapshot.weekly) {
                 const parts = [];
                 if (snapshot.weekly.tokensIn)
                     parts.push(`${_formatTokens(snapshot.weekly.tokensIn)} in / ${_formatTokens(snapshot.weekly.tokensOut)} out`);
@@ -220,13 +251,9 @@ function makeProviderCard(providerId, providerLabel) {
                 this._weekly.valueLabel.set_text('select 7d range for weekly');
             }
 
-            // Footer: updated time, range, plan weekly % (when the plan
-            // reports one), and any honest caveat (e.g. Ollama legacy plan
-            // has no tokens/cost).
+            // Footer: updated time + selected range + any honest caveat.
             const updated = new Date(snapshot.fetchedAt);
             let footerText = `updated ${_formatTime(updated)} · range ${rangeLabel}`;
-            if (snapshot.plan && snapshot.plan.weeklyPct !== null && snapshot.plan.weeklyPct !== undefined)
-                footerText += ` · weekly ${Math.round(snapshot.plan.weeklyPct)}%`;
             const note = snapshot.plan && snapshot.plan.note;
             if (note)
                 footerText += ` · ${note}`;
@@ -237,6 +264,23 @@ function makeProviderCard(providerId, providerLabel) {
         // this to renderBar() so the fill width is computed exactly.
         barWidth() {
             return this._bar.actor.get_width() || 200;
+        },
+
+        // Hide the bar row + its title (used when no real plan meter exists —
+        // showing a 0% bar would be misleading). Safe to call repeatedly.
+        hideBar() {
+            if (this._barTitle.get_parent() !== null)
+                this._barTitle.hide();
+            if (this._bar.actor.get_parent() !== null)
+                this._bar.actor.hide();
+        },
+
+        // Re-show the bar row after hideBar(). Safe to call repeatedly.
+        showBar() {
+            if (this._barTitle.get_parent() !== null)
+                this._barTitle.show();
+            if (this._bar.actor.get_parent() !== null)
+                this._bar.actor.show();
         },
 
         // @percent: plan meter fill (5h window % or Ollama allowance %).
@@ -254,6 +298,9 @@ function makeProviderCard(providerId, providerLabel) {
 
         renderError(message) {
             this.setStatus('error');
+            // The bar is meaningless during an error — hide it so the card
+            // shows the error text prominently instead of a misleading 0% bar.
+            this.hideBar();
             this._statIn.valueLabel.set_text('—');
             this._statOut.valueLabel.set_text('—');
             this._statReq.valueLabel.set_text('—');
@@ -294,4 +341,14 @@ function _formatNumber(n) {
 function _formatTime(date) {
     const pad = (x) => String(x).padStart(2, '0');
     return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+// "2026-10-31T03:00:00Z" -> "Oct 31 03:00" (local time, compact).
+function _formatReset(iso) {
+    const d = new Date(iso);
+    if (isNaN(d.getTime()))
+        return iso;
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const pad = (x) => String(x).padStart(2, '0');
+    return `${months[d.getMonth()]} ${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }

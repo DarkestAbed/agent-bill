@@ -51,6 +51,16 @@ const ollamaLegacyPayload = {
     },
     balance: null,
 };
+// Ollama /api/balance on a LEGACY/FREE tier — VERIFIED live 2026-10-26:
+// HTTP 200 with included.session / included.weekly request-quota meters
+// ({ remaining_percent, resets_at }) — NOT the dollar allowance shape.
+const ollamaLegacyBalance = {
+    included: {
+        session: { remaining_percent: 19.1, resets_at: '2026-10-27T03:00:00Z' },
+        weekly: { remaining_percent: 56.65, resets_at: '2026-11-02T00:00:00Z' },
+    },
+    purchased: { balance_usd: 0 },
+};
 // Claude PLAN OAuth /api/oauth/usage (legacy shape).
 const claudePlanLegacy = {
     five_hour: { utilization: 0.42, resets_at: '2026-10-27T05:00:00Z' },
@@ -229,6 +239,39 @@ test('ollama: when range is 7d the same payload serves as weekly (no duplicate f
     const merged = { range: ollamaLegacyPayload.weekly, weekly: ollamaLegacyPayload.weekly, balance: null };
     const snap = Usage.buildSnapshot('ollama', '7d', null, null, merged);
     assert.equal(snap.weekly.requests, 773);
+});
+
+// ---------- Ollama: LEGACY tier quota meters (VERIFIED live 2026-10-26) ----------
+test('ollama legacy tier: /api/balance included.session/weekly -> real used % (100 - remaining), resets kept', () => {
+    const merged = { ...ollamaLegacyPayload, balance: ollamaLegacyBalance };
+    const snap = Usage.buildSnapshot('ollama', '24h', null, null, merged);
+    // used% = 100 - remaining_percent: session 100-19.1=80.9, weekly 100-56.65=43.35→43.4 (rounded to 0.1)
+    assert.equal(snap.plan.windowPct, 80.9);
+    assert.equal(snap.plan.weeklyPct, 43.4);
+    assert.equal(snap.plan.windowResetAt, '2026-10-27T03:00:00Z');
+    assert.equal(snap.plan.weeklyResetAt, '2026-11-02T00:00:00Z');
+    // No dollar allowance on this tier.
+    assert.equal(snap.plan.allowancePct, null);
+    // Tokens/cost genuinely absent on this plan — honest note, no fabrication.
+    assert.equal(snap.tokensIn, null);
+    assert.match(snap.plan.note, /tokens\/cost not on your plan/);
+    // "no allowance reported" must NOT appear — a real meter IS reported now.
+    assert.doesNotMatch(snap.plan.note, /no allowance reported/);
+    // The meters are real even though /api/usage has no token/cost fields.
+    assert.equal(snap.requests, 773);
+    assert.equal(snap.weekly.requests, 773);
+});
+
+test('ollama: dollar allowance (paid) takes precedence over quota meters for the bar; quota still populates weekly line', () => {
+    const merged = { ...ollamaPaidPayload, balance: { ...ollamaPaidPayload.balance, included: {
+        ...ollamaPaidPayload.balance.included,
+        session: { remaining_percent: 19.1, resets_at: 'r1' },
+        weekly: { remaining_percent: 56.65, resets_at: 'r2' },
+    } } };
+    const snap = Usage.buildSnapshot('ollama', '24h', null, null, merged);
+    assert.equal(snap.plan.allowancePct, 27.5);  // dollar allowance kept
+    assert.equal(snap.plan.windowPct, 80.9);     // quota meters also present
+    assert.equal(snap.plan.weeklyPct, 43.4);
 });
 
 // ---------- error isolation (one bad provider must not break the others) ----------

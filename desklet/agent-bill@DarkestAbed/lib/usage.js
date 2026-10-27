@@ -12,11 +12,13 @@
 //     costUsd:    <number|null>,                  // spend in range if known
 //     weekly:     { tokensIn, tokensOut, requests }|null,   // 7d totals if available
 //     plan:       null | {                       // plan "allowance" meter (5h/7d %)
-//       windowPct:    <number|null>,            // 5-hour utilization %
+//       windowPct:    <number|null>,            // 5-hour utilization % (Claude/Codex plan,
+//                                               // Ollama legacy session quota: 100-remaining_%)
 //       windowResetAt:<ISO|null>,
-//       weeklyPct:    <number|null>,            // 7-day utilization %
+//       weeklyPct:    <number|null>,            // 7-day utilization % (Claude/Codex plan,
+//                                               // Ollama legacy weekly quota: 100-remaining_%)
 //       weeklyResetAt:<ISO|null>,
-//       allowancePct: <number|null>,            // Ollama: spend vs monthly allowance %
+//       allowancePct: <number|null>,            // Ollama PAID: spend vs monthly allowance %
 //       note:         <string|null>,            // honest caveat, e.g. "tokens/cost not on your plan"
 //     },
 //   }
@@ -27,7 +29,9 @@
 // organization admin key and return HTTP 403 for plan users). Plan usage comes
 // from the CLIs' own OAuth endpoints instead, which report utilization meters
 // (5-hour / 7-day %) rather than raw tokens. Ollama cloud /api/usage reports
-// request_count on legacy plans and additionally tokens/cost on paid plans.
+// request_count on legacy plans and additionally tokens/cost on paid plans;
+// /api/balance reports a dollar allowance (paid) or session/weekly
+// remaining_percent quota meters (legacy tier — both verified live).
 // Never fabricate a percentage: if a provider gives no limit, plan.* stays null.
 
 const HOUR_MS = 3600 * 1000;
@@ -216,13 +220,23 @@ function _planFromWham(d) {
 }
 
 // ---------------- Ollama cloud (/api/usage + /api/balance) ----------------
-// Real shape (verified 2026-10-26): { range, scope, granularity, from, until,
-//   totals: { request_count, [input_tokens, cached_input_tokens, output_tokens,
-//             usage_usd on PAID plans only] },
+// Real usage shape (verified 2026-10-26): { range, scope, granularity, from,
+//   until, totals: { request_count, [input_tokens, cached_input_tokens,
+//   output_tokens, usage_usd on PAID plans only] },
 //   buckets: [ { from, until, request_count, … } ] }
 // The provider merges three calls into { range, weekly, balance } so the
-// weekly line is always populated (Ollama has no 5h range) and the allowance %
-// is shown when the plan exposes /api/balance.
+// weekly line is always populated (Ollama has no 5h range).
+//
+// /api/balance has TWO verified shapes (2026-10-26):
+//   PAID:   { included: { balance_usd, allowance_usd, period }, … }  -> plan.allowancePct
+//   LEGACY: { included: { session: { remaining_percent, resets_at },
+//                         weekly:  { remaining_percent, resets_at } }, … }
+//           -> plan.windowPct = 100 - session.remaining_percent (session quota)
+//              plan.weeklyPct = 100 - weekly.remaining_percent (weekly quota)
+//   - CONSUMPTION % (Ollama legacy tier, verified live): /api/balance's
+//     included.session/included.weekly carry { remaining_percent, resets_at }
+//     — the REAL "% of usage" (100 - remaining_percent = used %). This is a
+//     request-quota meter, not a dollar meter.
 function _fillOllama(snap, range, data) {
     const rangePayload = (data && data.range) || data || {};
     const weeklyPayload = (data && data.weekly) || null;
@@ -250,15 +264,28 @@ function _fillOllama(snap, range, data) {
     const hasTokens = (totals.input_tokens !== undefined) || (totals.usage_usd !== undefined);
     if (!hasTokens)
         notes.push('tokens/cost not on your plan');
-    if (balance && balance.included &&
-        typeof balance.included.allowance_usd === 'number' && balance.included.allowance_usd > 0) {
-        const allowance = balance.included.allowance_usd;
-        const remaining = (typeof balance.included.balance_usd === 'number')
-            ? balance.included.balance_usd : allowance;
+    const included = balance && balance.included;
+    // (a) Dollar allowance (paid plans): allowance_usd/balance_usd.
+    if (included && typeof included.allowance_usd === 'number' && included.allowance_usd > 0) {
+        const allowance = included.allowance_usd;
+        const remaining = (typeof included.balance_usd === 'number')
+            ? included.balance_usd : allowance;
         plan.allowancePct = Math.round(Math.max(0, Math.min(100, ((allowance - remaining) / allowance) * 100)) * 10) / 10;
-    } else {
-        notes.push('no allowance reported');
     }
+    // (b) Request-quota meters (legacy/free tier, verified live 2026-10-26):
+    //     included.session = { remaining_percent, resets_at }  -> 5h-style window,
+    //     included.weekly  = { remaining_percent, resets_at }  -> 7-day window.
+    //     used% = 100 - remaining_percent. These are the plan's real usage %.
+    if (included && included.session && typeof included.session.remaining_percent === 'number') {
+        plan.windowPct = Math.round((100 - included.session.remaining_percent) * 10) / 10;
+        plan.windowResetAt = included.session.resets_at || null;
+    }
+    if (included && included.weekly && typeof included.weekly.remaining_percent === 'number') {
+        plan.weeklyPct = Math.round((100 - included.weekly.remaining_percent) * 10) / 10;
+        plan.weeklyResetAt = included.weekly.resets_at || null;
+    }
+    if (plan.allowancePct === null && plan.windowPct === null && plan.weeklyPct === null)
+        notes.push('no allowance reported');
     plan.note = notes.length ? notes.join(' · ') : null;
     snap.plan = plan;
 }
